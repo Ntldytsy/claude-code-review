@@ -1,0 +1,11 @@
+{
+  "name": "adversarial-code-review",
+  "description": "多 agent 对抗性代码审查与交付检查：多维度并行找问题 + 独立验证员逐条证伪，配套分层验证与部署纪律。内置成本控制（1 agent ≈ 10 万 token）",
+  "version": "0.1.0",
+  "author": {
+    "name": "Ntldytsy"
+  },
+  "license": "MIT",
+  "keywords": ["code-review", "workflow", "multi-agent", "deployment", "verification"],
+  "skills": ["./skills/code-review"]
+}

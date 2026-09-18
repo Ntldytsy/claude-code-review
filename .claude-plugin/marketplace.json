@@ -1,0 +1,21 @@
+{
+  "name": "ntldytsy-skills",
+  "owner": {
+    "name": "Ntldytsy"
+  },
+  "metadata": {
+    "description": "个人 Claude Code 技能集",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "adversarial-code-review",
+      "source": "./",
+      "description": "多 agent 对抗性代码审查与交付检查，内置成本控制",
+      "version": "0.1.0",
+      "author": {
+        "name": "Ntldytsy"
+      }
+    }
+  ]
+}
