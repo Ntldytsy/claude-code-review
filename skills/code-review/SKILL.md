@@ -79,6 +79,7 @@ description: Multi-agent adversarial code review — parallel reviewers per dime
 | `known` | 上轮已确认或已拍板不改的问题(不填会让 agent 把旧结论再报一遍) |
 | `only` / `skip` | 选/去默认维度;名字拼错会直接报错 |
 | `extraDims` | 追加 `security` / `reuse-consistency` / `llm-async` |
+| `inject` | `{维度key: [发现...]}`,跳过该维度找手、直接交验证员(单测验证员/复验用,见 `evals/README.md`) |
 | `mode` | `'cleanup'` = 整理瘦身模式,只跑 `dead-code` + `simplify` |
 | `diffBase` | 只审 `git diff <base>...HEAD` 的文件 |
 | `dims` | 完全自定义 `[{key, role, focus}]` |

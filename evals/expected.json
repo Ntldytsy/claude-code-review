@@ -1,55 +1,42 @@
 {
-  "说明": "sample-app 的标准答案。缺陷类必须命中 must_find；整理类必须命中 must_find_cleanup 且验证员自己写了影响面；must_not_confirm 里的诱饵不应出现在『确认』『可删』『可简化』里（判不成立或读不出结论都可以）。",
+  "说明": "sample-app 的标准答案。**答案文件在 sample-app 之外，评测必须在 sample-app 的临时副本上跑**（否则 agent 的全仓搜索会扫到本文件和 README）。缺陷类必须命中 must_find；整理类必须命中 must_find_cleanup 且验证员自己写了影响面；must_not_confirm 里的诱饵不应出现在『确认』『可删』『可简化』里（判不成立、读不出结论、或根本不报都可以，但「根本不报」不算通过诱饵测试——见 README）。",
   "must_find": [
     {
       "id": "BUG-1",
       "file": "billing.py",
+      "symbol": "pay",
       "keywords": [
         "重试",
         "超时",
         "重复扣",
         "charged"
       ],
-      "min_severity": "B-重要"
+      "min_severity": "B-重要",
+      "why": "超时后重试 charge，第一次可能已扣成功；3 次都超时仍标已扣费"
     },
     {
       "id": "BUG-2",
       "file": "billing.py",
+      "symbol": "refund",
       "keywords": [
         "吞",
         "except",
         "refund"
       ],
-      "min_severity": "B-重要"
+      "min_severity": "B-重要",
+      "why": "退款失败被 except: pass 吞掉，仍标已退款"
     },
     {
       "id": "BUG-3",
       "file": "billing.py",
+      "symbol": "describe",
       "keywords": [
         "reciept",
         "未定义",
         "NameError"
       ],
-      "min_severity": "C-建议"
-    }
-  ],
-  "must_not_confirm": [
-    {
-      "id": "DECOY-1",
-      "file": "billing.py",
-      "why": "admin_total 无鉴权是诱饵：唯一调用方 admin_cli.py 已在入口校验管理员；验证员应判『不成立』或至少不进『确认』"
-    },
-    {
-      "id": "DECOY-2",
-      "file": "billing.py",
-      "symbol": "on_refund",
-      "why": "由 dispatch.py 用 getattr 动态调用；按名字搜不到引用但不能删。验证员应判不成立，或至少读不出结论"
-    },
-    {
-      "id": "DECOY-3",
-      "file": "billing.py",
-      "symbol": "parse_model_reply",
-      "why": "剥掉 ```json 包裹是让常见情况成功，要留"
+      "min_severity": "C-建议",
+      "why": "拼写错误的未定义名，订单不存在时才炸（pyflakes 能抓）"
     }
   ],
   "must_find_cleanup": [
@@ -58,21 +45,67 @@
       "file": "billing.py",
       "symbol": "legacy_format",
       "bucket": "可删",
-      "why": "全仓无任何引用（含动态引用）"
+      "why": "全仓没有任何引用，含动态引用"
     },
     {
       "id": "CLEAN-2",
       "file": "billing.py",
       "symbol": "AmountFormatter",
       "bucket": "可简化",
-      "why": "只有一处使用，可内联成一行"
+      "why": "一个类+一个方法只被 format_amount 用一次，可内联成一行"
     },
     {
       "id": "CLEAN-3",
       "file": "billing.py",
       "symbol": "total_cents",
       "bucket": "可简化",
-      "why": "调用方保证类型，isinstance/None 判断是为不可能场景写的"
+      "why": "唯一调用方 admin_total 传入的永远是 db.orders.values()，None/isinstance 判断是为不可能场景写的"
     }
-  ]
+  ],
+  "must_not_confirm": [
+    {
+      "id": "DECOY-1",
+      "file": "billing.py",
+      "symbol": "admin_total",
+      "why": "没有鉴权看着像漏洞，但唯一调用方 admin_cli.py 入口已校验管理员；验证员应判不成立，或至少不进『确认』"
+    },
+    {
+      "id": "DECOY-2",
+      "file": "billing.py",
+      "symbol": "on_refund",
+      "why": "按名字全仓只命中定义，但由 dispatch.py 用 getattr(billing, 'on_'+event) 动态调用，不能删。验证员应判不成立，或读不出结论并写明有动态引用"
+    },
+    {
+      "id": "DECOY-3",
+      "file": "billing.py",
+      "symbol": "parse_model_reply",
+      "why": "剥掉 ```json 包裹是让常见情况成功，要留。验证员应判不成立"
+    }
+  ],
+  "诱饵测试怎么算通过": "诱饵必须**被找手报出来、再被验证员正确否掉或标读不出结论**才算验证员过关。找手根本没报，只说明找手保守，验证员没被考到——第一次评测就是这样。",
+  "verifier_only_test": {
+    "说明": "用 args.inject 把下面这些发现直接喂给验证员（跳过找手）。诱饵的措辞模拟「只做字面量 rg 的保守找手」会写出的错误结论。",
+    "inject_dead_code": [
+      {
+        "symbol": "legacy_format",
+        "期望": "成立",
+        "why": "真死代码（对照组）"
+      },
+      {
+        "symbol": "on_refund",
+        "期望": "不成立（或读不出结论并写明动态引用）",
+        "why": "admin_cli → dispatch → getattr(billing,'on_'+event) 动态调用；找手只搜字面量会漏"
+      },
+      {
+        "symbol": "parse_model_reply",
+        "期望": "不成立",
+        "why": "剥 ```json 包裹是让常见情况成功，简化成 strip() 行为不等价"
+      },
+      {
+        "symbol": "total_cents（fix 写成 sum(o['cents'] ...)）",
+        "期望": "不成立，或成立且 correction 给出行为等价的写法",
+        "why": "该替换对缺 cents 抛 KeyError、对 None 抛 TypeError，行为不等价。注意：这是边界例，两次实测验证员给过两种处理（一次成立+补充提醒，一次不成立）"
+      }
+    ]
+  }
 }

@@ -1,8 +1,17 @@
 import sys
-from billing import admin_total
+from billing import admin_total, describe, format_amount, parse_model_reply
+from dispatch import dispatch
 
 def main(db):
-    # 启动时校验：非管理员直接退出，admin_total 不会被其他入口调用
     if db.current_user_role != "admin":
         sys.exit("admin only")
-    print(admin_total(db))
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "total"
+    if cmd == "total":
+        print(format_amount(admin_total(db)))
+    elif cmd == "list":
+        for oid in db.orders:
+            print(describe(db, oid))
+    elif cmd == "reply":
+        print(parse_model_reply(sys.stdin.read()))
+    else:
+        dispatch(db, cmd, sys.argv[2])

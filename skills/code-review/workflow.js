@@ -17,6 +17,7 @@ export const meta = {
 //   extraDims  string[]                        追加可选维度：'security' / 'reuse-consistency' / 'llm-async'
 //   dims       [{key,role,focus}]              完全自定义，传了就只跑它们
 //   mode       'cleanup'                       整理瘦身模式：只跑 dead-code + simplify（≈ only: ['dead-code','simplify']）
+//   inject     {维度key: [发现...]}            跳过该维度的找手，直接把这些发现交给验证员（单测验证员 / 复验用，格式同找手输出）
 //   diffBase   string                          只审 `git diff <diffBase>...HEAD` 涉及的文件（日常省钱用）
 const P = (typeof args === 'object' && args) || {}
 
@@ -72,6 +73,9 @@ const KNOWN = [
 
 const CONTEXT = `${PROJECT}
 
+# 搜索范围
+**只在上面「被审代码」列出的路径内搜索和阅读**，不要读这些路径之外的文件（包括上级目录、评测/答案/说明文件）。
+
 # 已经找过、不要重复报告的问题
 ${KNOWN.map((k) => `- ${k}`).join('\n')}
 `
@@ -96,8 +100,13 @@ const OUT_CLEAN = `# 输出要求（精简类：死代码 / 冗余 / 过度设�
   路由/配置/DI/模板/序列化里按名字引用、测试、对外导出的公共 API。impact 里写「搜了什么 → 命中什么」
 - fix 写成**可直接照做的步骤**：删哪几行/哪个文件，连带会变成孤儿的 import/变量/函数也一并列出；
   简化类要写出简化后的样子（伪代码或具体改法），并说明**行为为什么等价**
+- cleanupType：整段删掉填「删除」，留着但改更简单的写法填「简化」（别因为是死代码维度就一律填删除）
 - linesSaved 给预计净减少的行数；risk 写风险（低/中/高 + 原因）
+- **净减 0 行的纯命名/微小可读性问题不报**（如把未使用的循环变量改成下划线）
 - 拿不准能不能删（有动态引用、对外 API、跨仓库）也要报，在 risk 里写明——由验证员和用户决定
+- **needsDecision 别滥用**：「是否对外 API」只有**有迹象**才写——库/包的入口、\`__all__\`、文档或 README 里提到、
+  被其他仓库引用。应用内部函数/脚本没有这些迹象，就不要写 needsDecision，在 risk 里写「低」即可。
+  needsDecision 只留给真要人拍板的（抽公共模块、行为会变、对外契约）
 - **为「让常见情况成功」而写的处理要留，不报**（如解析模型输出前剥掉 \`\`\`json 包裹）；只有「防不可能发生的情形 / 已被外层兜住」才算冗余
 - 不报纯命名/缩进/引号偏好；不报上面已列出的`
 
@@ -123,7 +132,8 @@ const findingsSchema = (cap) => ({
           fix:      { type: 'string', description: '缺陷：最简修法，只写必要那几行，匹配周围风格。精简：可直接照做的删除/简化步骤，含连带孤儿' },
           alternatives:  { type: 'string', description: '若存在不止一种合理改法，并列写出其他改法与取舍；只有一种就留空。不要静默替用户选' },
           impact:        { type: 'string', description: '缺陷：动到别人依赖的什么+消费方。**精简：必填**，写「搜了什么 → 命中什么」，含动态引用检查结果' },
-          needsDecision: { type: 'string', description: '需要人拍板才能改的原因（改表/产品语义/成本策略/抽公共模块/为性能牺牲简洁/对外 API）；不需要就留空' },
+          needsDecision: { type: 'string', description: '真需要人拍板的原因（改表/产品语义/成本策略/抽公共模块/为性能牺牲简洁/**有迹象表明是对外 API**）；不需要就留空。别因为"理论上可能被外部调用"就填' },
+          cleanupType:   { type: 'string', enum: ['删除', '简化'], description: '精简类：整段删掉=删除；留着但换更简单的写法=简化（决定报告里归到「可删除」还是「可简化」）' },
           linesSaved:    { type: 'integer', description: '精简类：预计净减少行数' },
           risk:          { type: 'string', description: '精简类：风险（低/中/高 + 原因）' },
           severity: { type: 'string', enum: ['A-阻断', 'B-重要', 'C-建议'], description: '精简类一般填 C-建议' },
@@ -156,6 +166,7 @@ const VERDICT = {
           reason: { type: 'string', description: '你读了哪些行、为什么确认或否掉' },
           correction:       { type: 'string', description: '若原描述(含行号)有误但问题仍成立，写出准确描述' },
           severityAdjusted: { type: 'string' },
+          correctedLine:    { type: 'integer', description: '若找手报的行号有偏差，这里写真实的起始行号（报告会采用它）；没偏差就省略' },
           // 精简类的验证员必须自己搜一遍并写在这里；空的话汇总时会把「成立」降级成「读不出结论」
           impactChecked:    { type: 'string', description: '精简类必填：你自己做的消费方搜索——命令、命中结果、动态引用检查结论' },
         },
@@ -213,7 +224,8 @@ const DEFAULT_DIMS = [
 - 注释与代码不符（注释描述的是旧行为）
 - ⚠️ 排除项：**为"让常见情况成功"而写的处理要留**（如剥掉 \`\`\`json 包裹）。框架按约定调用的魔法名
   （生命周期钩子、约定路径文件、序列化/DI 按名字调用）不是死代码。对外导出的公共 API
-  不能断言没人用——要报，但 risk 写「可能有外部调用方」，needsDecision 写明`,
+  不能断言没人用——有迹象（库入口、__all__、文档提到）才要报并写 needsDecision；
+  纯应用内部的函数不必每条都问「是否公共 API」`,
   },
   {
     key: 'simplify',
@@ -312,6 +324,7 @@ const 校验键 = (arr, 名) => (arr || []).forEach((k) => {
   }
 })
 校验键(P.only, 'only'); 校验键(P.skip, 'skip')
+if (P.inject) Object.keys(P.inject).forEach((k) => { if (!Array.isArray(P.inject[k])) throw new Error(`args.inject.${k} 必须是发现数组`) })
 if (P.mode && P.mode !== 'cleanup') throw new Error(`args.mode 只支持 'cleanup'，收到 "${P.mode}"`)
 const ONLY = P.only || (P.mode === 'cleanup' ? ['dead-code', 'simplify'] : null)
 const 默认选中 = DEFAULT_DIMS
@@ -347,7 +360,7 @@ const 判据缺陷 = `【kind=缺陷 的判法】
   ⚠️ 但**跨文件的"用户可见不一致"不算纯风格**：同一个操作在两个页面按钮颜色/主次不同、
   文案不同、交互不同——用户会以为是两个不同功能。说得清"用户会怎么被误导"就是**成立**。
   只有缩进/引号/变量命名/内部结构这种用户看不见的差异才算风格。
-- 描述有小错但问题实际成立 → **成立**，并在 correction 里写出准确描述`
+- 描述有小错但问题实际成立 → **成立**，并在 correction 里写出准确描述；行号有偏差就填 **correctedLine**`
 
 const 判据精简 = `【kind=精简 的判法】（死代码/冗余/过度设计：没有失败场景是正常的，**不要**拿"推演不出失败场景"当不成立的理由，
 也不要因为"它不会出错/只是风格"就否掉——整理代码、提高可维护性正是本轮目的）
@@ -364,7 +377,7 @@ const 判据精简 = `【kind=精简 的判法】（死代码/冗余/过度设�
 6. 无法排除动态引用/对外 API/跨仓库调用 → **读不出结论**，在 reason 里写清卡在哪，
    不要压成「不成立」——它是「不确定能不能删」，要留给人决定
 7. 找手贴的代码必须能在真实文件里逐字找到；找不到 → **不成立**，写明"证据在文件中不存在"
-8. 行号偏差不算否掉的理由：同一文件邻近位置能找到就算数，真实行号写进 correction`
+8. 行号偏差不算否掉的理由：同一文件邻近位置能找到就算数，真实起始行号填 **correctedLine**，其余写进 correction`
 
 const 验证一批 = (d, 批, 偏移) => {
   const numbered = 批
@@ -402,7 +415,9 @@ const 验证批量 = 8
 phase('Find')
 const results = await pipeline(
   DIMS,
-  (d) => agent(d.prompt, { label: `find:${d.key}`, phase: 'Find', schema: findingsSchema(d.cap) }),
+  (d) => (P.inject && P.inject[d.key])
+    ? { findings: P.inject[d.key], suppressed: 0 }   // 注入的发现：跳过找手，直接进验证
+    : agent(d.prompt, { label: `find:${d.key}`, phase: 'Find', schema: findingsSchema(d.cap) }),
   async (found, d) => {
     // found 为空 = 找手没返回，**不是**「这个维度干净」。必须单独标出来，否则 0 条会被读成没问题
     if (!found || !Array.isArray(found.findings)) {
@@ -440,6 +455,8 @@ for (const r of rs) {
     }
     merged.push({
       dim: r.key, ...f,
+      // 验证员给了真实行号就以它为准，报告里的 文件:行号 才可点、才对得上
+      claimedLine: f.line, line: (v && v.correctedLine) || f.line,
       verdict, verifyReason: reason,
       correction: v && v.correction,
       severityAdjusted: v && v.severityAdjusted,
@@ -455,7 +472,9 @@ const 去重 = []
 for (const m of merged) {
   const dup = 去重.find((x) => x.kind === m.kind && x.file === m.file && Math.abs((x.line || 0) - (m.line || 0)) <= 3 && x.dim !== m.dim)
   if (dup) {
-    ;(dup.alsoFoundBy ||= []).push(`${m.dim}（${m.verdict}）`)
+    const tag = `${m.dim}（${m.verdict}）`
+    ;(dup.alsoFoundBy ||= [])
+    if (!dup.alsoFoundBy.includes(tag)) dup.alsoFoundBy.push(tag)
   } else {
     去重.push(m)
   }
@@ -467,8 +486,10 @@ const 成立   = 去重.filter((m) => m.verdict === '成立')
 // 缺陷与精简分开呈现：精简类是一份**整理清单**（用户据此删代码、简化代码），不与缺陷修复混在一起
 const 确认   = 成立.filter((m) => m.kind !== '精简')
 const 整理   = 成立.filter((m) => m.kind === '精简')
-const 可删   = 整理.filter((m) => m.dim === 'dead-code')
-const 可简化 = 整理.filter((m) => m.dim !== 'dead-code')
+// 按发现的性质分桶（cleanupType），不按它是哪个维度报的——死代码维度也会报「留着但该简化」的
+const 是删除 = (m) => (m.cleanupType ? m.cleanupType === '删除' : m.dim === 'dead-code')
+const 可删   = 整理.filter(是删除)
+const 可简化 = 整理.filter((m) => !是删除(m))
 const 按收益 = (a, b) => (b.linesSaved || 0) - (a.linesSaved || 0)
 const 需拍板 = 成立.filter((m) => m.needsDecision)
 const 证伪   = 去重.filter((m) => m.verdict === '不成立')
