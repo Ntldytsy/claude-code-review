@@ -16,6 +16,7 @@ export const meta = {
 //   skip       string[]                        跳过这些默认维度
 //   extraDims  string[]                        追加可选维度：'security' / 'reuse-consistency' / 'llm-async'
 //   dims       [{key,role,focus}]              完全自定义，传了就只跑它们
+//   mode       'cleanup'                       整理瘦身模式：只跑 dead-code + simplify（≈ only: ['dead-code','simplify']）
 //   diffBase   string                          只审 `git diff <diffBase>...HEAD` 涉及的文件（日常省钱用）
 const P = (typeof args === 'object' && args) || {}
 
@@ -73,46 +74,65 @@ const CONTEXT = `${PROJECT}
 
 # 已经找过、不要重复报告的问题
 ${KNOWN.map((k) => `- ${k}`).join('\n')}
+`
 
-# 输出要求
+// 两类发现，找法与判法完全不同，不能共用一套标准——
+// 「缺陷」要能推演出失败场景；「精简」（死代码/冗余/过度设计）本来就没有失败场景，
+// 它的依据是「查清影响面后确认能删/能简化」。共用一套会把精简类全部毙掉
+const OUT_BUG = `# 输出要求（缺陷类）
 只报你能在代码里指出具体行、并说清"什么输入/什么时序会出错"的问题。
 宁缺毋滥：拿不准的不要报。不要报纯风格问题，不要报上面已列出的。
 注意：**缩进/引号/命名/内部结构的差异 = 纯风格，不报**；但**同一个操作在不同页面
 呈现给用户的样子不一致（按钮主次或颜色、文案、位置、交互、报错提示）不是风格问题**，
 它是用户能看见的缺陷，该报。
-`
+所有发现 kind 填「缺陷」。`
 
-const FINDINGS = {
+const OUT_CLEAN = `# 输出要求（精简类：死代码 / 冗余 / 过度设计）
+本轮的目的是**让代码更简洁、更好维护**。AI 写的代码常见：多余的方法、没必要的抽象、过度防御、
+同一逻辑写多遍、绕远路。**这些没有"失败场景"，但同样要报**——别因为"它不会出错"就不报。
+- 所有发现 kind 填「精简」；failure 字段写「留着它的代价」（读者负担/维护风险/误导/重复漂移），不是失败场景
+- **影响面必须你自己查清再写进 impact**：对要删/要改的每个符号做带符号名的全仓搜索（用 rg，**不要加文件后缀过滤**；
+  命中 0 时先自检过滤器再下结论），并检查**动态引用**：字符串拼接出的名字、反射/getattr、
+  路由/配置/DI/模板/序列化里按名字引用、测试、对外导出的公共 API。impact 里写「搜了什么 → 命中什么」
+- fix 写成**可直接照做的步骤**：删哪几行/哪个文件，连带会变成孤儿的 import/变量/函数也一并列出；
+  简化类要写出简化后的样子（伪代码或具体改法），并说明**行为为什么等价**
+- linesSaved 给预计净减少的行数；risk 写风险（低/中/高 + 原因）
+- 拿不准能不能删（有动态引用、对外 API、跨仓库）也要报，在 risk 里写明——由验证员和用户决定
+- **为「让常见情况成功」而写的处理要留，不报**（如解析模型输出前剥掉 \`\`\`json 包裹）；只有「防不可能发生的情形 / 已被外层兜住」才算冗余
+- 不报纯命名/缩进/引号偏好；不报上面已列出的`
+
+const findingsSchema = (cap) => ({
   type: 'object',
   required: ['findings', 'suppressed'],
   properties: {
-    // 8 条是硬上限。超了必须在 suppressed 里报数，否则被砍掉的条目无声消失
-    suppressed: { type: 'integer', description: '你实际找到、但因 8 条上限没报上来的条数。没有就填 0' },
+    // 上限是硬的。超了必须在 suppressed 里报数，否则被砍掉的条目无声消失
+    suppressed: { type: 'integer', description: `你实际找到、但因 ${cap} 条上限没报上来的条数。没有就填 0` },
     findings: {
       type: 'array',
-      maxItems: 8,
+      maxItems: cap,
       items: {
         type: 'object',
-        required: ['title', 'file', 'line', 'evidence', 'failure', 'fix', 'severity'],
+        required: ['kind', 'title', 'file', 'line', 'evidence', 'failure', 'fix', 'severity'],
         properties: {
+          kind:     { type: 'string', enum: ['缺陷', '精简'], description: '缺陷=会出错；精简=死代码/冗余/过度设计，不出错但该删或该简化' },
           title:    { type: 'string', description: '一句话说清问题' },
           file:     { type: 'string' },
           line:     { type: 'integer' },
           evidence: { type: 'string', description: '贴出关键代码，说明为什么是问题' },
-          // 这个字段是判真假的唯一依据，逼 agent 从"我觉得不好"变成"这样点会出错"
-          failure:  { type: 'string', description: '具体失败场景：什么输入/什么时序 → 什么错误结果' },
-          fix:      { type: 'string', description: '最简修法：只写必要那几行，匹配周围既有风格，不顺手重构、不加当前环境走不到的兜底' },
-          // 下面四个可选字段对应修改方案：并列改法 / 影响面 / 拍板 / 既有代码，缺了方案就只能靠主会话临时补
+          failure:  { type: 'string', description: '缺陷：具体失败场景（什么输入/时序 → 什么错误结果）。精简：留着它的代价（读者负担/维护风险/误导/重复漂移）' },
+          fix:      { type: 'string', description: '缺陷：最简修法，只写必要那几行，匹配周围风格。精简：可直接照做的删除/简化步骤，含连带孤儿' },
           alternatives:  { type: 'string', description: '若存在不止一种合理改法，并列写出其他改法与取舍；只有一种就留空。不要静默替用户选' },
-          impact:        { type: 'string', description: '改这里会动到别人依赖的什么（签名/返回结构/字段/共享常量），以及你搜到的消费方；形状没变就留空' },
-          needsDecision: { type: 'string', description: '需要人拍板才能改的原因（改表/产品语义/成本策略/抽公共模块/为性能牺牲简洁）；不需要就留空' },
-          preexisting:   { type: 'boolean', description: '问题是否在本次改动之前就存在（仅在限定了审查范围为 diff 时有意义；其他情况可省）' },
-          severity: { type: 'string', enum: ['A-阻断', 'B-重要', 'C-建议'] },
+          impact:        { type: 'string', description: '缺陷：动到别人依赖的什么+消费方。**精简：必填**，写「搜了什么 → 命中什么」，含动态引用检查结果' },
+          needsDecision: { type: 'string', description: '需要人拍板才能改的原因（改表/产品语义/成本策略/抽公共模块/为性能牺牲简洁/对外 API）；不需要就留空' },
+          linesSaved:    { type: 'integer', description: '精简类：预计净减少行数' },
+          risk:          { type: 'string', description: '精简类：风险（低/中/高 + 原因）' },
+          severity: { type: 'string', enum: ['A-阻断', 'B-重要', 'C-建议'], description: '精简类一般填 C-建议' },
         },
       },
     },
   },
-}
+})
+const CAP = { 缺陷: 8, 精简: 15 }
 
 const VERDICT = {
   type: 'object',
@@ -131,11 +151,13 @@ const VERDICT = {
           verdict: {
             type: 'string',
             enum: ['成立', '不成立', '读不出结论'],
-            description: '能推演出失败场景=成立；确认被挡住/不可能/纯内部风格=不成立；读了但证据不足以判定=读不出结论',
+            description: '缺陷：能推演出失败场景=成立。精简：查清影响面后确认能删/能简化=成立。被挡住/不可能/有活引用=不成立；证据不足以判定=读不出结论',
           },
           reason: { type: 'string', description: '你读了哪些行、为什么确认或否掉' },
           correction:       { type: 'string', description: '若原描述(含行号)有误但问题仍成立，写出准确描述' },
           severityAdjusted: { type: 'string' },
+          // 精简类的验证员必须自己搜一遍并写在这里；空的话汇总时会把「成立」降级成「读不出结论」
+          impactChecked:    { type: 'string', description: '精简类必填：你自己做的消费方搜索——命令、命中结果、动态引用检查结论' },
         },
       },
     },
@@ -175,19 +197,40 @@ const DEFAULT_DIMS = [
 - 位置耦合与写死常量：按下标取值、写死的尺寸/magic number，上游布局或数据顺序一变就静默错位`,
   },
   {
-    key: 'dead-code-overdesign',
-    role: '冗余与过度设计审查员。找**不该存在的代码**，不找缺陷',
-    focus: `- 未被任何地方引用的函数/路由/组件/导出/样式类
-- 只剩一个调用方、或整个模块只为一个两行函数存在的间接层
-- 同一逻辑的多份实现（含逐字复制的分支），以及它们已经漂移出的差异
-- **当前环境永远走不到的分支**：为不可能的场景写的降级/兼容/兜底
-- 为假设需求预留、至今没有使用者的抽象与配置项
+    key: 'dead-code',
+    kind: '精简',
+    role: '死代码审查员。找**可以安全删除的代码**，并把影响面查清楚。不找缺陷',
+    focus: `**方法（必须照做）**：先枚举定义——函数/方法/类/导出/路由/组件/常量/配置项/样式类/依赖包，
+再对**每一个**名字做带符号名的全仓搜索；命中只有定义本身 = 候选。然后检查动态引用
+（字符串拼接名、反射/getattr、路由/配置/DI/模板里按名字引用、测试、对外导出的公共 API）。
+大仓库按 PATHS 分区逐个扫，别只抽查几处。
+- 没有任何引用的函数/方法/类/导出/路由/组件/常量/配置项/样式类/依赖包
+- 只被死代码引用的代码（连锁死亡：删了 A，B 也就没人用了，要一并列出）
 - 触发点已被注释掉/删除，但下游整条链路还留着的"死链路"
+- **当前环境永远走不到的分支**：为不可能的场景写的降级/兼容/兜底
+- 被注释掉的大段旧代码、已完成的 TODO 残留、遗留的临时 console.log / 观测日志
+- 未使用的 import / 变量 / 参数
 - 注释与代码不符（注释描述的是旧行为）
-- 本次联调遗留的临时 console.log / 观测日志
-- ⚠️ 排除项：**为"让常见情况成功"而写的处理要留**（如解析模型输出前剥掉 \`\`\`json 包裹——模型高频加、不剥会真失败）。
-  只有"防不可能发生的情形 / 已被外层兜住"的才算冗余。拿不准就别报
-- ⚠️ 既有的无关死代码也可以报，但**必须标 preexisting=true**：它不进本次改动，只作"建议清理"提醒`,
+- ⚠️ 排除项：**为"让常见情况成功"而写的处理要留**（如剥掉 \`\`\`json 包裹）。框架按约定调用的魔法名
+  （生命周期钩子、约定路径文件、序列化/DI 按名字调用）不是死代码。对外导出的公共 API
+  不能断言没人用——要报，但 risk 写「可能有外部调用方」，needsDecision 写明`,
+  },
+  {
+    key: 'simplify',
+    kind: '精简',
+    role: '简化审查员。AI 写的代码常常过度复杂；找**可以更简单、且行为等价**的代码',
+    focus: `判据：「一个资深工程师会不会说这过度复杂了？」「删掉/内联它，结果变不变？」不变就该报。
+- 只有一处使用的 helper/函数/类/抽象层/配置项/参数/开关——可以内联
+- 只为一个两行函数而存在的模块、多层转发/包装、一层包一层
+- 为不可能场景写的防御：不会发生的 null/类型判断、已被外层兜住的 try/catch
+- 同一逻辑的多份实现（含逐字复制的分支），以及它们已漂移出的差异——合并成一份
+- 为假设需求预留、至今没有使用者的抽象与配置
+- 能在数据层一次解决的事，却在内存里多轮循环/多层转换；手写了框架/标准库现成就有的能力
+- 绕远路：先转成 A 再转成 B 只为拿到 A；冗余的中间变量/状态/缓存；一次性使用的临时结构
+- 过长的函数：50 行能写成 15 行且行为不变
+- 简化后必须**行为等价**——写出等价依据；做不到等价的不报
+- ⚠️ 排除项：「让常见情况成功」的处理要留；已有 ≥2 处真实复用且抽取合理的不报；
+  纯命名/缩进/引号偏好不报。跨文件抽公共模块要 needsDecision（先与协作方确认）`,
   },
   {
     key: 'flow-sanity',
@@ -239,7 +282,7 @@ const EXTRA_DIMS = {
   },
 
   // 【什么时候必须加】同一个需求改了多处 · 新功能是照着已有功能做的 · 多人分头实现同一类页面
-  //   它查的不是"重复代码"(那是 dead-code-overdesign),是"同一件事被写成了多种样子"
+  //   它查的不是"重复代码"(那是 dead-code / simplify 维度),是"同一件事被写成了多种样子"
   'reuse-consistency': {
     key: 'reuse-consistency',
     role: '复用与一致性审查员。找**同一件事被写成了多种样子**，不找缺陷、也不找内部风格偏好',
@@ -269,55 +312,32 @@ const 校验键 = (arr, 名) => (arr || []).forEach((k) => {
   }
 })
 校验键(P.only, 'only'); 校验键(P.skip, 'skip')
+if (P.mode && P.mode !== 'cleanup') throw new Error(`args.mode 只支持 'cleanup'，收到 "${P.mode}"`)
+const ONLY = P.only || (P.mode === 'cleanup' ? ['dead-code', 'simplify'] : null)
 const 默认选中 = DEFAULT_DIMS
-  .filter((d) => !P.only || P.only.includes(d.key))
+  .filter((d) => !ONLY || ONLY.includes(d.key))
   .filter((d) => !(P.skip || []).includes(d.key))
-const DIMS = (P.dims || [...默认选中, ...选用]).map((d) => ({
-  key: d.key,
-  prompt: `你是${d.role}。
+const DIMS = (P.dims || [...默认选中, ...选用]).map((d) => {
+  const kind = d.kind || '缺陷'
+  const cap = CAP[kind]
+  return {
+    key: d.key, kind, cap,
+    prompt: `你是${d.role}。
 ${CONTEXT}
+${kind === '精简' ? OUT_CLEAN : OUT_BUG}
+
 重点看这些地方（先读代码再下结论）：
 ${d.focus}
-逐个核实后再报。最多 8 条——**若你找到的超过 8 条，报最严重的 8 条，并把多出来的条数写进 suppressed 字段**。`,
-}))
+逐个核实后再报。最多 ${cap} 条——**若你找到的超过 ${cap} 条，报最值得处理的 ${cap} 条，并把多出来的条数写进 suppressed 字段**。`,
+  }
+})
 
 if (!DIMS.length) throw new Error('筛完一个维度都不剩（only/skip/extraDims 的组合把它们都排除了），已中止')
-log(`本轮 ${DIMS.length} 个维度 = ${DIMS.length * 2} 个 agent（找手+验证员）≈ ${DIMS.length * 20} 万 token：${DIMS.map((d) => d.key).join(', ')}`)
+log(`本轮 ${DIMS.length} 个维度 ≥ ${DIMS.length * 2} 个 agent（找手+验证员；精简类发现多时验证员会分批，更多）≈ ${DIMS.length * 20}+ 万 token：${DIMS.map((d) => d.key).join(', ')}`)
 
-// ── 编排：每个维度独立流水线(找→验)，维度之间不设栅栏 ────────────────
-phase('Find')
-const results = await pipeline(
-  DIMS,
-  (d) => agent(d.prompt, { label: `find:${d.key}`, phase: 'Find', schema: FINDINGS }),
-  (found, d) => {
-    // found 为空 = 找手没返回，**不是**「这个维度干净」。必须单独标出来，否则 0 条会被读成没问题
-    if (!found || !Array.isArray(found.findings)) {
-      return { key: d.key, findings: [], verdicts: [], suppressed: 0, finderFailed: true }
-    }
-    const list = found.findings
-    const suppressed = found.suppressed || 0
-    if (!list.length) return { key: d.key, findings: [], verdicts: [], suppressed }
-    const numbered = list
-      .map((f, i) => `【${i + 1}】${f.title}
-  文件: ${f.file}:${f.line}
-  证据: ${f.evidence}
-  声称的失败场景: ${f.failure}
-  建议修法: ${f.fix}
-  自评严重度: ${f.severity}`)
-      .join('\n\n')
-    return agent(
-      `你是对抗性验证员，任务是**尽力证伪**下面这些声称的问题。默认立场：不成立。
-${CONTEXT}
-下面是另一个审查员报的 ${list.length} 条问题，逐条打开对应文件核实：
-
-${numbered}
-
-对每一条给出 verdict（三选一），并在 index 里写它的序号：
+// 验证员判据：两类发现的「成立」含义相反，必须分开写，否则精简类会被缺陷类的标准全部毙掉
+const 判据缺陷 = `【kind=缺陷 的判法】
 - 只有当你**亲自读到那些行**、并且能推演出声称的失败场景确实会发生 → **成立**
-- **行号偏差不算否掉的理由**：按行号打开后，若在同一文件邻近位置能找到声称的代码，
-  仍判成立，把真实行号写进 correction。
-  ⚠️ 上面那段"证据"是另一个 agent 写的，**可能是它编的**——贴出来的代码必须能在真实文件里
-  逐字找到。整个文件里都找不到 → **不成立**，并在 reason 里写明"证据在文件中不存在"。
 - 代码里已有别的机制挡住了该场景 → **不成立**
 - 属于**设计如此/文档化的允许行为**，并不是 bug → **不成立**（先确认那个"异常"到底是不是 bug）
 - 推演不够时可以用**只读**命令实测：静态检查器、grep、在内存/临时环境里跑最小复现。
@@ -325,16 +345,76 @@ ${numbered}
 - 属于"为不可能的场景担心" → **不成立**
 - 纯风格/口味问题 → **不成立**。
   ⚠️ 但**跨文件的"用户可见不一致"不算纯风格**：同一个操作在两个页面按钮颜色/主次不同、
-  文案不同、交互不同——用户会以为是两个不同功能。这类要按能否说清"用户会怎么被误导"来判，
-  说得清就是**成立**。只有缩进/引号/变量命名/内部结构这种用户看不见的差异才算风格。
-- 描述有小错但问题实际成立 → **成立**，并在 correction 里写出准确描述
-- **读了相关代码，但证据不足以判断它到底会不会发生**（缺上下文、依赖运行时配置、
-  要跨仓库才能确认）→ **读不出结论**，并在 reason 里写清卡在哪。
-  **不要把这种情况压成"不成立"**——压了就会和真正的假阳性混在一起，人工抽查时无从下手。
+  文案不同、交互不同——用户会以为是两个不同功能。说得清"用户会怎么被误导"就是**成立**。
+  只有缩进/引号/变量命名/内部结构这种用户看不见的差异才算风格。
+- 描述有小错但问题实际成立 → **成立**，并在 correction 里写出准确描述`
+
+const 判据精简 = `【kind=精简 的判法】（死代码/冗余/过度设计：没有失败场景是正常的，**不要**拿"推演不出失败场景"当不成立的理由，
+也不要因为"它不会出错/只是风格"就否掉——整理代码、提高可维护性正是本轮目的）
+你的任务是**证伪「它可以删/可以简化」**：去找一个**活的引用**或**行为差异**。
+1. 你必须**自己**做消费方搜索，不要采信找手写的 impact：对被删/被改的每个符号做带符号名的全仓搜索
+   （rg，不加文件后缀过滤；命中 0 时先自检过滤器再下结论），再查动态引用：字符串拼接名、反射/getattr、
+   路由/配置/DI/模板/序列化里按名字引用、测试、对外导出的公共 API。
+   把「搜了什么 → 命中什么 → 结论」写进 **impactChecked**（必填）。
+2. 找到活引用，或删/改后行为会变 → **不成立**，reason 写明引用在哪
+3. 是「让常见情况成功」的处理（如剥掉 \`\`\`json 包裹）→ **不成立**
+4. 简化类：能写出**行为等价**的依据 → **成立**；两种写法行为有差异 → **不成立**
+5. 所有引用都已搜清、确实没有活引用（死代码），或简化后确实等价 → **成立**；
+   把更准确的行号/连带孤儿/行数写进 correction（找手漏列的连带孤儿尤其要补）
+6. 无法排除动态引用/对外 API/跨仓库调用 → **读不出结论**，在 reason 里写清卡在哪，
+   不要压成「不成立」——它是「不确定能不能删」，要留给人决定
+7. 找手贴的代码必须能在真实文件里逐字找到；找不到 → **不成立**，写明"证据在文件中不存在"
+8. 行号偏差不算否掉的理由：同一文件邻近位置能找到就算数，真实行号写进 correction`
+
+const 验证一批 = (d, 批, 偏移) => {
+  const numbered = 批
+    .map((f, i) => `【${i + 1}】[kind=${f.kind || d.kind}] ${f.title}
+  文件: ${f.file}:${f.line}
+  证据: ${f.evidence}
+  ${f.kind === '精简' ? '留着的代价' : '声称的失败场景'}: ${f.failure}
+  ${f.kind === '精简' ? '找手声称的影响面(仅供参考，必须自己重查)' : '影响面'}: ${f.impact || '(未写)'}
+  建议改法: ${f.fix}
+  自评严重度: ${f.severity}`)
+    .join('\n\n')
+  const 含精简 = 批.some((f) => (f.kind || d.kind) === '精简')
+  const 含缺陷 = 批.some((f) => (f.kind || d.kind) === '缺陷')
+  return agent(
+    `你是对抗性验证员，任务是**尽力证伪**下面这些声称的问题。默认立场：不成立。
+${CONTEXT}
+下面是另一个审查员报的 ${批.length} 条，逐条打开对应文件核实。每条标了 kind，**按各自的判法**：
+
+${numbered}
+
+${含缺陷 ? 判据缺陷 + '\n\n' : ''}${含精简 ? 判据精简 + '\n\n' : ''}通用：
+- **读了相关代码，但证据不足以判断**（缺上下文、依赖运行时配置、要跨仓库才能确认）→ **读不出结论**，
+  并在 reason 里写清卡在哪。**不要把这种情况压成"不成立"**——压了就会和真正的假阳性混在一起，人工抽查时无从下手。
+- 上面的"证据"是另一个 agent 写的，**可能是它编的**。
+对每一条给出 verdict（三选一），并在 index 里写它的序号（就是上面【】里的数字）。
 必须对上面每一条都给出判定，一条不落。`,
-      { label: `verify:${d.key}`, phase: 'Verify', schema: VERDICT, effort: 'high' },
-    ).then((v) => ({ key: d.key, findings: list, verdicts: (v && v.verdicts) || [], suppressed }))
-     .catch(() => ({ key: d.key, findings: list, verdicts: [], suppressed }))  // 验证员挂了：落入「未判定」，不丢找手的发现
+    { label: `verify:${d.key}${偏移 ? `#${偏移 / 验证批量 + 1}` : ''}`, phase: 'Verify', schema: VERDICT, effort: 'high' },
+  ).then((v) => ((v && v.verdicts) || []).map((x) => ({ ...x, index: x.index + 偏移 })))
+   .catch(() => [])   // 验证员挂了：这一批落入「未判定」，不丢找手的发现
+}
+// 精简类每条都要自己搜全仓，一个验证员塞太多会越查越浅，所以分批
+const 验证批量 = 8
+
+// ── 编排：每个维度独立流水线(找→验)，维度之间不设栅栏 ────────────────
+phase('Find')
+const results = await pipeline(
+  DIMS,
+  (d) => agent(d.prompt, { label: `find:${d.key}`, phase: 'Find', schema: findingsSchema(d.cap) }),
+  async (found, d) => {
+    // found 为空 = 找手没返回，**不是**「这个维度干净」。必须单独标出来，否则 0 条会被读成没问题
+    if (!found || !Array.isArray(found.findings)) {
+      return { key: d.key, findings: [], verdicts: [], suppressed: 0, finderFailed: true }
+    }
+    const list = found.findings.map((f) => ({ ...f, kind: f.kind || d.kind }))
+    const suppressed = found.suppressed || 0
+    if (!list.length) return { key: d.key, findings: [], verdicts: [], suppressed }
+    const 批们 = []
+    for (let i = 0; i < list.length; i += 验证批量) 批们.push([list.slice(i, i + 验证批量), i])
+    const 各批 = await Promise.all(批们.map(([批, 偏移]) => 验证一批(d, 批, 偏移)))
+    return { key: d.key, findings: list, verdicts: 各批.flat(), suppressed }
   },
 )
 
@@ -351,22 +431,29 @@ const merged = []
 for (const r of rs) {
   r.findings.forEach((f, i) => {
     const v = r.verdicts.find((x) => x.index === i + 1)
+    let verdict = v ? v.verdict : '未拿到判定'
+    let reason = v ? v.reason : '验证员没返回这一条'
+    // 精简类的「成立」必须带验证员自己做的影响面搜索；没写等于没查，降级，不能当「可以删」
+    if (f.kind === '精简' && verdict === '成立' && !(v.impactChecked || '').trim()) {
+      verdict = '读不出结论'
+      reason = `验证员判了成立但没写 impactChecked（没有自己做影响面搜索），不能直接当"可以删"。${reason}`
+    }
     merged.push({
       dim: r.key, ...f,
-      verdict: v ? v.verdict : '未拿到判定',
-      verifyReason: v ? v.reason : '验证员没返回这一条',
+      verdict, verifyReason: reason,
       correction: v && v.correction,
       severityAdjusted: v && v.severityAdjusted,
+      impactChecked: v && v.impactChecked,
     })
   })
 }
 
-// 跨维度去重：同文件、行号相差 ≤3 视为同一处。不另起 agent（零成本），只合并展示，
+// 跨维度去重：同类、同文件、行号相差 ≤3 视为同一处。不另起 agent（零成本），只合并展示，
 // 保留先出现的那条，把其他维度名连同它们各自的判定记进 alsoFoundBy——
 // 两个验证员判定冲突时不替人选，冲突原样摆在 alsoFoundBy 里让人看
 const 去重 = []
 for (const m of merged) {
-  const dup = 去重.find((x) => x.file === m.file && Math.abs((x.line || 0) - (m.line || 0)) <= 3 && x.dim !== m.dim)
+  const dup = 去重.find((x) => x.kind === m.kind && x.file === m.file && Math.abs((x.line || 0) - (m.line || 0)) <= 3 && x.dim !== m.dim)
   if (dup) {
     ;(dup.alsoFoundBy ||= []).push(`${m.dim}（${m.verdict}）`)
   } else {
@@ -377,29 +464,36 @@ for (const m of merged) {
 // 四个桶，不是三个：「读不出结论」是验证员读了但判不了，「未判定」是压根没返回。
 // 两者都不等于"没问题"，但卡住的原因不同，处理方式也不同
 const 成立   = 去重.filter((m) => m.verdict === '成立')
-// 「只提醒、不删」：既有的无关死代码不进本次改动方案，单列「建议清理」由用户决定。
-// 整库审查时死代码维度的全部发现都归这里；限定了 diff 时，只有 preexisting=true 的才归这里
-// （本次改动自己制造的孤儿属于本次改动，留在主方案里）
-const 是清理 = (m) => m.dim === 'dead-code-overdesign' && (!P.diffBase || m.preexisting === true)
-const 建议清理 = 成立.filter(是清理)
-const 确认   = 成立.filter((m) => !是清理(m))
-const 需拍板 = 确认.filter((m) => m.needsDecision)
+// 缺陷与精简分开呈现：精简类是一份**整理清单**（用户据此删代码、简化代码），不与缺陷修复混在一起
+const 确认   = 成立.filter((m) => m.kind !== '精简')
+const 整理   = 成立.filter((m) => m.kind === '精简')
+const 可删   = 整理.filter((m) => m.dim === 'dead-code')
+const 可简化 = 整理.filter((m) => m.dim !== 'dead-code')
+const 按收益 = (a, b) => (b.linesSaved || 0) - (a.linesSaved || 0)
+const 需拍板 = 成立.filter((m) => m.needsDecision)
 const 证伪   = 去重.filter((m) => m.verdict === '不成立')
 const 存疑   = 去重.filter((m) => m.verdict === '读不出结论')
 const 未判定 = 去重.filter((m) => m.verdict === '未拿到判定')
 const 被截断 = rs.reduce((n, r) => n + (r.suppressed || 0), 0)
+const 总行数 = 整理.reduce((n, m) => n + (m.linesSaved || 0), 0)
 
-log(`找到 ${merged.length} 条（跨维度去重后 ${去重.length}），确认 ${确认.length}（其中需拍板 ${需拍板.length}），建议清理 ${建议清理.length}，证伪 ${证伪.length}，存疑 ${存疑.length}，未判定 ${未判定.length}`)
+log(`找到 ${merged.length} 条（去重后 ${去重.length}）：缺陷确认 ${确认.length}；可删 ${可删.length}、可简化 ${可简化.length}（预计净减 ${总行数} 行）；需拍板 ${需拍板.length}；证伪 ${证伪.length}，存疑 ${存疑.length}，未判定 ${未判定.length}`)
 if (失败维度.length) log(`❌ 维度 ${失败维度.join(', ')} 的找手没有返回——这些维度**没审**，0 条不代表干净，需要重跑`)
-if (存疑.length) log(`⚠️ ${存疑.length} 条「读不出结论」——这是人工复核的第一优先级,不要当成"没问题"`)
+if (存疑.length) log(`⚠️ ${存疑.length} 条「读不出结论」——人工复核第一优先级（其中精简类多半是"无法排除动态引用/对外 API"，不是"不能删"）`)
 if (未判定.length) log(`⚠️ ${未判定.length} 条没拿到判定，去 journal.jsonl 核原始返回值，不要当成"没问题"`)
-if (被截断) log(`⚠️ 另有 ${被截断} 条因每维度 8 条上限没报上来。要拿全就按维度拆细再跑一轮`)
+if (被截断) log(`⚠️ 另有 ${被截断} 条因每维度上限没报上来（缺陷 ${CAP.缺陷} / 精简 ${CAP.精简}）。要拿全就按分区拆细再跑一轮`)
 
 // 现成的 markdown 报告：脚本里没有写文件的能力，由调用方（SKILL.md 步骤 3）把它落盘，再据此出修改方案
 const 条目 = (m) => `- **[${m.severityAdjusted || m.severity}] ${m.title}** — \`${m.file}:${m.line}\`（${m.dim}${m.alsoFoundBy ? `；另被 ${m.alsoFoundBy.join('、')} 报出` : ''}）
   - 失败场景：${m.failure}
   - 验证：${m.verifyReason}${m.correction ? `\n  - 修正：${m.correction}` : ''}
   - 最简修法：${m.fix}${m.alternatives ? `\n  - 其他改法与取舍：${m.alternatives}` : ''}${m.impact ? `\n  - 影响面：${m.impact}` : ''}${m.needsDecision ? `\n  - ⚠️ 需人拍板：${m.needsDecision}` : ''}`
+// 整理清单每条自带：为什么留着有害 / 影响面（验证员自己搜的结果）/ 怎么删怎么改 / 风险，用户看这一条就能决定删不删
+const 整理条目 = (m) => `- **${m.title}** — \`${m.file}:${m.line}\`${m.linesSaved ? `　预计净减 ${m.linesSaved} 行` : ''}（${m.dim}${m.alsoFoundBy ? `；另被 ${m.alsoFoundBy.join('、')} 报出` : ''}）
+  - 留着的代价：${m.failure}
+  - 影响面（验证员实查）：${m.impactChecked || '(未写)'}
+  - 怎么做：${m.correction ? `${m.fix}\n  - 验证员补充：${m.correction}` : m.fix}${m.alternatives ? `\n  - 其他做法与取舍：${m.alternatives}` : ''}
+  - 风险：${m.risk || '(未写)'}${m.needsDecision ? `\n  - ⚠️ 需人拍板：${m.needsDecision}` : ''}`
 const 分级 = ['A-阻断', 'B-重要', 'C-建议']
 const 报告 = [
   `# 代码审查报告`,
@@ -407,28 +501,35 @@ const 报告 = [
   失败维度.length ? `\n> ❌ 未审成：${失败维度.join(', ')}（找手无返回，0 条≠干净）` : '',
   被截断 ? `> ⚠️ 被截断 ${被截断} 条，本轮没报全` : '',
   // 需要人拍板的单独拎到最前面，别埋在一大段里被「顺手一起同意」
-  需拍板.length ? `\n## ⚠️ 需你拍板（${需拍板.length}）\n${需拍板.map((m) => `- **${m.title}** — \`${m.file}:${m.line}\`：${m.needsDecision}${m.alternatives ? `（可选改法：${m.alternatives}）` : ''}`).join('\n')}` : '',
-  `\n## 确认（${确认.length}）`,
+  需拍板.length ? `\n## ⚠️ 需你拍板（${需拍板.length}）\n${需拍板.map((m) => `- **${m.title}** — \`${m.file}:${m.line}\`：${m.needsDecision}${m.alternatives ? `（可选做法：${m.alternatives}）` : ''}`).join('\n')}` : '',
+  `\n## 缺陷（${确认.length}）`,
   ...分级.map((lv) => {
     const xs = 确认.filter((m) => (m.severityAdjusted || m.severity) === lv)
     return xs.length ? `\n### ${lv}\n${xs.map(条目).join('\n')}` : ''
   }),
-  建议清理.length ? `\n## 建议清理·非本次范围，只提醒、不动（${建议清理.length}）\n${建议清理.map((m) => `- ${m.title} — \`${m.file}:${m.line}\`（${m.failure}）`).join('\n')}` : '',
+  `\n## 整理清单·可删除的代码（${可删.length}）`,
+  `> 影响面已由验证员独立搜索确认；按预计净减行数从多到少排。建议**单独成一次提交**，不与缺陷修复混在一起。`,
+  ...可删.sort(按收益).map(整理条目),
+  `\n## 整理清单·可简化的过度设计（${可简化.length}）`,
+  ...可简化.sort(按收益).map(整理条目),
+  整理.length ? `\n> 整理清单合计预计净减约 ${总行数} 行。` : '',
   `\n## 存疑·人工复核第一优先（${存疑.length}）`,
-  ...存疑.map((m) => `- ${m.title} — \`${m.file}:${m.line}\`（${m.dim}）卡在：${m.verifyReason}`),
+  ...存疑.map((m) => `- [${m.kind}] ${m.title} — \`${m.file}:${m.line}\`（${m.dim}）卡在：${m.verifyReason}`),
   `\n## 未判定·去 journal.jsonl 核（${未判定.length}）`,
-  ...未判定.map((m) => `- ${m.title} — \`${m.file}:${m.line}\`（${m.dim}）`),
+  ...未判定.map((m) => `- [${m.kind}] ${m.title} — \`${m.file}:${m.line}\`（${m.dim}）`),
   `\n## 证伪·抽查（${证伪.length}）`,
-  ...证伪.map((m) => `- ${m.title}（${m.dim}）— ${m.verifyReason}`),
+  ...证伪.map((m) => `- [${m.kind}] ${m.title}（${m.dim}）— ${m.verifyReason}`),
 ].filter((x) => x !== '').join('\n')
 
 return {
   报告,
   确认,
+  可删,
+  可简化,
+  预计净减行数: 总行数,
   需拍板: 需拍板.map((m) => ({ dim: m.dim, title: m.title, file: m.file, line: m.line, 原因: m.needsDecision })),
-  建议清理,
-  存疑: 存疑.map((r) => ({ dim: r.dim, title: r.title, file: r.file, line: r.line, 卡在哪: r.verifyReason })),
-  证伪: 证伪.map((r) => ({ dim: r.dim, title: r.title, 为何否掉: r.verifyReason })),
+  存疑: 存疑.map((r) => ({ dim: r.dim, kind: r.kind, title: r.title, file: r.file, line: r.line, 卡在哪: r.verifyReason })),
+  证伪: 证伪.map((r) => ({ dim: r.dim, kind: r.kind, title: r.title, 为何否掉: r.verifyReason })),
   未判定,
   被截断,
   失败维度,

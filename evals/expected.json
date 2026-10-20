@@ -1,11 +1,78 @@
 {
-  "说明": "sample-app 的标准答案。跑完工作流后，对照这份看：必须命中 must_find，不应在『确认』桶里出现 must_not_confirm。",
+  "说明": "sample-app 的标准答案。缺陷类必须命中 must_find；整理类必须命中 must_find_cleanup 且验证员自己写了影响面；must_not_confirm 里的诱饵不应出现在『确认』『可删』『可简化』里（判不成立或读不出结论都可以）。",
   "must_find": [
-    {"id": "BUG-1", "file": "billing.py", "keywords": ["重试", "超时", "重复扣", "charged"], "min_severity": "B-重要"},
-    {"id": "BUG-2", "file": "billing.py", "keywords": ["吞", "except", "refund"], "min_severity": "B-重要"},
-    {"id": "BUG-3", "file": "billing.py", "keywords": ["reciept", "未定义", "NameError"], "min_severity": "C-建议"}
+    {
+      "id": "BUG-1",
+      "file": "billing.py",
+      "keywords": [
+        "重试",
+        "超时",
+        "重复扣",
+        "charged"
+      ],
+      "min_severity": "B-重要"
+    },
+    {
+      "id": "BUG-2",
+      "file": "billing.py",
+      "keywords": [
+        "吞",
+        "except",
+        "refund"
+      ],
+      "min_severity": "B-重要"
+    },
+    {
+      "id": "BUG-3",
+      "file": "billing.py",
+      "keywords": [
+        "reciept",
+        "未定义",
+        "NameError"
+      ],
+      "min_severity": "C-建议"
+    }
   ],
   "must_not_confirm": [
-    {"id": "DECOY-1", "file": "billing.py", "why": "admin_total 无鉴权是诱饵：唯一调用方 admin_cli.py 已在入口校验管理员；验证员应判『不成立』或至少不进『确认』"}
+    {
+      "id": "DECOY-1",
+      "file": "billing.py",
+      "why": "admin_total 无鉴权是诱饵：唯一调用方 admin_cli.py 已在入口校验管理员；验证员应判『不成立』或至少不进『确认』"
+    },
+    {
+      "id": "DECOY-2",
+      "file": "billing.py",
+      "symbol": "on_refund",
+      "why": "由 dispatch.py 用 getattr 动态调用；按名字搜不到引用但不能删。验证员应判不成立，或至少读不出结论"
+    },
+    {
+      "id": "DECOY-3",
+      "file": "billing.py",
+      "symbol": "parse_model_reply",
+      "why": "剥掉 ```json 包裹是让常见情况成功，要留"
+    }
+  ],
+  "must_find_cleanup": [
+    {
+      "id": "CLEAN-1",
+      "file": "billing.py",
+      "symbol": "legacy_format",
+      "bucket": "可删",
+      "why": "全仓无任何引用（含动态引用）"
+    },
+    {
+      "id": "CLEAN-2",
+      "file": "billing.py",
+      "symbol": "AmountFormatter",
+      "bucket": "可简化",
+      "why": "只有一处使用，可内联成一行"
+    },
+    {
+      "id": "CLEAN-3",
+      "file": "billing.py",
+      "symbol": "total_cents",
+      "bucket": "可简化",
+      "why": "调用方保证类型，isinstance/None 判断是为不可能场景写的"
+    }
   ]
 }
