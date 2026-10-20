@@ -8,7 +8,15 @@ export const meta = {
   ],
 }
 
-// 入参示例：{ paths: {...}, extraKnown: ['...'], dims: [{key, focus}] }
+// 入参（全部可选；不改本文件、只靠 args 就能跑）：
+//   paths      {分区名: 绝对路径}              被审代码
+//   project    string                          替换下面「这是什么/不可逆副作用/团队标准」三段
+//   known      string[]                        已知问题（extraKnown 是同义旧名，仍可用）
+//   only       string[]                        只跑这些默认维度，如 ['backend-bugs']（成本表的「轻量/标准」就靠它）
+//   skip       string[]                        跳过这些默认维度
+//   extraDims  string[]                        追加可选维度：'security' / 'reuse-consistency'
+//   dims       [{key,role,focus}]              完全自定义，传了就只跑它们
+//   diffBase   string                          只审 `git diff <diffBase>...HEAD` 涉及的文件（日常省钱用）
 const P = (typeof args === 'object' && args) || {}
 
 // ── ① 被审代码分区。键就是你项目的代码分区名，自己定，数量不限 ──────
@@ -17,10 +25,7 @@ const PATHS = P.paths || {
 }
 
 // ── ② 项目背景：每个 agent 都会看到这段 ─────────────────────────────
-const PROJECT = `
-# 被审代码
-${Object.entries(PATHS).map(([k, v]) => `- ${k}：${v}`).join('\n')}
-
+const PROJECT_BODY = P.project || `
 # 这是什么
 【按项目填:一段话说清项目做什么、主要流程、关键机制(鉴权/异步/状态存哪)】
 
@@ -30,6 +35,16 @@ ${Object.entries(PATHS).map(([k, v]) => `- ${k}：${v}`).join('\n')}
 
 # 团队的明确标准
 【按项目填:引用你自己说过的原话，例如"只要满足要求的最简单方案""过度设计本身就是缺陷"】
+`
+const PROJECT = `
+# 被审代码
+${Object.entries(PATHS).map(([k, v]) => `- ${k}：${v}`).join('\n')}
+${P.diffBase ? `
+# 审查范围（重要）
+只审改动面：先在被审目录里跑 \`git diff --name-only ${P.diffBase}...HEAD\` 拿到文件清单，
+**只读、只报这些文件里的问题**；需要看调用方/上下文时可以读别的文件，但问题本身必须落在改动文件上。
+` : ''}
+${PROJECT_BODY}
 `
 
 // ── 模板没填就炸,别让一整轮 agent 拿着占位符白跑十几分钟 ──────────
@@ -50,6 +65,7 @@ if (未填.length) {
 //    一条"已知问题"进 prompt,agent 读到的是一句没有意义的指令
 const KNOWN = [
   '【按项目填:上一轮已确认或已拍板不改的问题，一行一条。首次跑可留空数组】',
+  ...(P.known || []),
   ...(P.extraKnown || []),
 ].filter((k) => !占位(k))
 
@@ -216,7 +232,17 @@ const 选用 = (P.extraDims || []).map((n) => {
   if (!d) throw new Error(`args.extraDims 里的 "${n}" 不是可选维度。可选：${Object.keys(EXTRA_DIMS).join(' / ')}`)
   return d
 })
-const DIMS = (P.dims || [...DEFAULT_DIMS, ...选用]).map((d) => ({
+// only/skip 的名字拼错同样要炸：静默少跑一个维度，比报错更糟
+const 校验键 = (arr, 名) => (arr || []).forEach((k) => {
+  if (!DEFAULT_DIMS.some((d) => d.key === k)) {
+    throw new Error(`args.${名} 里的 "${k}" 不是默认维度。可选：${DEFAULT_DIMS.map((d) => d.key).join(' / ')}`)
+  }
+})
+校验键(P.only, 'only'); 校验键(P.skip, 'skip')
+const 默认选中 = DEFAULT_DIMS
+  .filter((d) => !P.only || P.only.includes(d.key))
+  .filter((d) => !(P.skip || []).includes(d.key))
+const DIMS = (P.dims || [...默认选中, ...选用]).map((d) => ({
   key: d.key,
   prompt: `你是${d.role}。
 ${CONTEXT}
@@ -225,14 +251,21 @@ ${d.focus}
 逐个核实后再报。最多 8 条——**若你找到的超过 8 条，报最严重的 8 条，并把多出来的条数写进 suppressed 字段**。`,
 }))
 
+if (!DIMS.length) throw new Error('筛完一个维度都不剩（only/skip/extraDims 的组合把它们都排除了），已中止')
+log(`本轮 ${DIMS.length} 个维度 = ${DIMS.length * 2} 个 agent（找手+验证员）≈ ${DIMS.length * 20} 万 token：${DIMS.map((d) => d.key).join(', ')}`)
+
 // ── 编排：每个维度独立流水线(找→验)，维度之间不设栅栏 ────────────────
 phase('Find')
 const results = await pipeline(
   DIMS,
   (d) => agent(d.prompt, { label: `find:${d.key}`, phase: 'Find', schema: FINDINGS }),
   (found, d) => {
-    const list = (found && found.findings) || []
-    const suppressed = (found && found.suppressed) || 0
+    // found 为空 = 找手没返回，**不是**「这个维度干净」。必须单独标出来，否则 0 条会被读成没问题
+    if (!found || !Array.isArray(found.findings)) {
+      return { key: d.key, findings: [], verdicts: [], suppressed: 0, finderFailed: true }
+    }
+    const list = found.findings
+    const suppressed = found.suppressed || 0
     if (!list.length) return { key: d.key, findings: [], verdicts: [], suppressed }
     const numbered = list
       .map((f, i) => `【${i + 1}】${f.title}
@@ -268,13 +301,21 @@ ${numbered}
 必须对上面每一条都给出判定，一条不落。`,
       { label: `verify:${d.key}`, phase: 'Verify', schema: VERDICT, effort: 'high' },
     ).then((v) => ({ key: d.key, findings: list, verdicts: (v && v.verdicts) || [], suppressed }))
+     .catch(() => ({ key: d.key, findings: list, verdicts: [], suppressed }))  // 验证员挂了：落入「未判定」，不丢找手的发现
   },
 )
 
 // ── 汇总：按 index 回填判定 ─────────────────────────────────────────
 phase('Synthesize')
+const rs = results.filter(Boolean)
+// pipeline 里整条流水线抛错会变成 null/缺位：同样不能当成「干净」
+const 失败维度 = [
+  ...rs.filter((r) => r.finderFailed).map((r) => r.key),
+  ...DIMS.filter((d) => !rs.some((r) => r.key === d.key)).map((d) => d.key),
+]
+
 const merged = []
-for (const r of results.filter(Boolean)) {
+for (const r of rs) {
   r.findings.forEach((f, i) => {
     const v = r.verdicts.find((x) => x.index === i + 1)
     merged.push({
@@ -286,23 +327,64 @@ for (const r of results.filter(Boolean)) {
     })
   })
 }
+
+// 跨维度去重：同文件、行号相差 ≤3 视为同一处。不另起 agent（零成本），只合并展示，
+// 保留先出现的那条，把其他维度名连同它们各自的判定记进 alsoFoundBy——
+// 两个验证员判定冲突时不替人选，冲突原样摆在 alsoFoundBy 里让人看
+const 去重 = []
+for (const m of merged) {
+  const dup = 去重.find((x) => x.file === m.file && Math.abs((x.line || 0) - (m.line || 0)) <= 3 && x.dim !== m.dim)
+  if (dup) {
+    ;(dup.alsoFoundBy ||= []).push(`${m.dim}（${m.verdict}）`)
+  } else {
+    去重.push(m)
+  }
+}
+
 // 四个桶，不是三个：「读不出结论」是验证员读了但判不了，「未判定」是压根没返回。
 // 两者都不等于"没问题"，但卡住的原因不同，处理方式也不同
-const 确认   = merged.filter((m) => m.verdict === '成立')
-const 证伪   = merged.filter((m) => m.verdict === '不成立')
-const 存疑   = merged.filter((m) => m.verdict === '读不出结论')
-const 未判定 = merged.filter((m) => m.verdict === '未拿到判定')
-const 被截断 = results.filter(Boolean).reduce((n, r) => n + (r.suppressed || 0), 0)
+const 确认   = 去重.filter((m) => m.verdict === '成立')
+const 证伪   = 去重.filter((m) => m.verdict === '不成立')
+const 存疑   = 去重.filter((m) => m.verdict === '读不出结论')
+const 未判定 = 去重.filter((m) => m.verdict === '未拿到判定')
+const 被截断 = rs.reduce((n, r) => n + (r.suppressed || 0), 0)
 
-log(`找到 ${merged.length} 条，确认 ${确认.length}，证伪 ${证伪.length}，存疑 ${存疑.length}，未判定 ${未判定.length}`)
+log(`找到 ${merged.length} 条（跨维度去重后 ${去重.length}），确认 ${确认.length}，证伪 ${证伪.length}，存疑 ${存疑.length}，未判定 ${未判定.length}`)
+if (失败维度.length) log(`❌ 维度 ${失败维度.join(', ')} 的找手没有返回——这些维度**没审**，0 条不代表干净，需要重跑`)
 if (存疑.length) log(`⚠️ ${存疑.length} 条「读不出结论」——这是人工复核的第一优先级,不要当成"没问题"`)
 if (未判定.length) log(`⚠️ ${未判定.length} 条没拿到判定，去 journal.jsonl 核原始返回值，不要当成"没问题"`)
 if (被截断) log(`⚠️ 另有 ${被截断} 条因每维度 8 条上限没报上来。要拿全就按维度拆细再跑一轮`)
 
+// 现成的 markdown 报告：脚本里没有写文件的能力，由调用方（SKILL.md 步骤 3）把它落盘，再据此出修改方案
+const 条目 = (m) => `- **[${m.severityAdjusted || m.severity}] ${m.title}** — \`${m.file}:${m.line}\`（${m.dim}${m.alsoFoundBy ? `；另被 ${m.alsoFoundBy.join('、')} 报出` : ''}）
+  - 失败场景：${m.failure}
+  - 验证：${m.verifyReason}${m.correction ? `\n  - 修正：${m.correction}` : ''}
+  - 最简修法：${m.fix}`
+const 分级 = ['A-阻断', 'B-重要', 'C-建议']
+const 报告 = [
+  `# 代码审查报告`,
+  `维度：${DIMS.map((d) => d.key).join(', ')}${P.diffBase ? `；范围：diff ${P.diffBase}...HEAD` : ''}`,
+  失败维度.length ? `\n> ❌ 未审成：${失败维度.join(', ')}（找手无返回，0 条≠干净）` : '',
+  被截断 ? `> ⚠️ 被截断 ${被截断} 条，本轮没报全` : '',
+  `\n## 确认（${确认.length}）`,
+  ...分级.map((lv) => {
+    const xs = 确认.filter((m) => (m.severityAdjusted || m.severity) === lv)
+    return xs.length ? `\n### ${lv}\n${xs.map(条目).join('\n')}` : ''
+  }),
+  `\n## 存疑·人工复核第一优先（${存疑.length}）`,
+  ...存疑.map((m) => `- ${m.title} — \`${m.file}:${m.line}\`（${m.dim}）卡在：${m.verifyReason}`),
+  `\n## 未判定·去 journal.jsonl 核（${未判定.length}）`,
+  ...未判定.map((m) => `- ${m.title} — \`${m.file}:${m.line}\`（${m.dim}）`),
+  `\n## 证伪·抽查（${证伪.length}）`,
+  ...证伪.map((m) => `- ${m.title}（${m.dim}）— ${m.verifyReason}`),
+].filter((x) => x !== '').join('\n')
+
 return {
+  报告,
   确认,
   存疑: 存疑.map((r) => ({ dim: r.dim, title: r.title, file: r.file, line: r.line, 卡在哪: r.verifyReason })),
   证伪: 证伪.map((r) => ({ dim: r.dim, title: r.title, 为何否掉: r.verifyReason })),
   未判定,
   被截断,
+  失败维度,
 }

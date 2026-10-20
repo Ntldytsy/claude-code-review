@@ -1,0 +1,11 @@
+{
+  "说明": "sample-app 的标准答案。跑完工作流后，对照这份看：必须命中 must_find，不应在『确认』桶里出现 must_not_confirm。",
+  "must_find": [
+    {"id": "BUG-1", "file": "billing.py", "keywords": ["重试", "超时", "重复扣", "charged"], "min_severity": "B-重要"},
+    {"id": "BUG-2", "file": "billing.py", "keywords": ["吞", "except", "refund"], "min_severity": "B-重要"},
+    {"id": "BUG-3", "file": "billing.py", "keywords": ["reciept", "未定义", "NameError"], "min_severity": "C-建议"}
+  ],
+  "must_not_confirm": [
+    {"id": "DECOY-1", "file": "billing.py", "why": "admin_total 无鉴权是诱饵：唯一调用方 admin_cli.py 已在入口校验管理员；验证员应判『不成立』或至少不进『确认』"}
+  ]
+}
