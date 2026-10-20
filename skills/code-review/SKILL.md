@@ -26,6 +26,7 @@ description: Multi-agent adversarial code review — parallel reviewers per dime
 | **跑满默认配置** | **4**(DEFAULT_DIMS 全开) | **8** | **~80 万** | 接手陌生代码库,且已确认预算够 |
 | 默认 + `security` | 5 | **10** | ~100 万 | 涉敏感面的项目做全量 |
 | 默认 + 两个可选维度 | 6 | **12** | **~120 万** | 上限。除非明确要求,不要走这档 |
+| 默认 + 三个可选维度 | 7 | **14** | **~140 万** | 全部维度(含 `llm-async`)。几乎不该走这档 |
 
 > ⚠️ **直接跑未改过的 `workflow.js` = 最后一行(8 个 agent、约 80 万),不是「标准」那档。**
 > `DEFAULT_DIMS` 正好有 4 个维度,别把它和表里「标准」那个 4 搞混——一个是维度数、一个是 agent 数。
@@ -72,7 +73,7 @@ description: Multi-agent adversarial code review — parallel reviewers per dime
 | `project` | 一段话:项目做什么 / 哪些是不可逆副作用 / 团队标准,**必填** |
 | `known` | 上轮已确认或已拍板不改的问题(不填会让 agent 把旧结论再报一遍) |
 | `only` / `skip` | 选/去默认维度;名字拼错会直接报错 |
-| `extraDims` | 追加 `security` / `reuse-consistency` |
+| `extraDims` | 追加 `security` / `reuse-consistency` / `llm-async` |
 | `diffBase` | 只审 `git diff <base>...HEAD` 的文件 |
 | `dims` | 完全自定义 `[{key, role, focus}]` |
 
@@ -80,7 +81,7 @@ description: Multi-agent adversarial code review — parallel reviewers per dime
 
 - **`paths` / `project` 没填会直接中止**(脚本自带守卫),不会让一整轮 agent 拿着占位符白跑。
 - **两个可选维度默认不开**(在 `EXTRA_DIMS` 里,传 `args.extraDims` 追加):
-  `security`(涉敏感面时必开,见上)、`reuse-consistency`(同一需求改了多处、或新功能是照着旧功能做的时候开)。
+  `security`(涉敏感面时必开,见上)、`reuse-consistency`(同一需求改了多处、或新功能是照着旧功能做的时候开)、`llm-async`(调用大模型生成内容或有慢的异步生成任务时开)。
 - **换技术栈必须换 `DIMS` 的重点清单**。默认那几个维度假设了「ORM+事务」的后端和「SPA 生命周期」的前端;PHP/纯 HTML 项目照跑会整段空转。→ 查 `reference/stack-mapping.md`(索引,指向各栈单独文件)。
 - 改了脚本或 prompt 之后,用 `evals/` 里的靶子回归一次(约 20 万),确认审查没变钝。
 
@@ -115,14 +116,17 @@ description: Multi-agent adversarial code review — parallel reviewers per dime
 
 ### 5. 出修改方案
 
-对「确认」桶逐条写方案,格式(问题 / 失败场景 / 改法 / 影响面 / 改完怎么验 / 谁来拍板)、排序规则、
-哪些不进方案 → `reference/playbook.md` §5。要点:
+对「确认」桶逐条写方案,格式、排序、分桶全文在 `reference/playbook.md` §5。要点:
 
-- 改法只写必要那几行,**不顺手重构、不加当前环境走不到的兜底**。
-- 每条写明「改完怎么验」,且该验证在改之前应当失败。
-- 存疑 / 未判定的单列「待核实」,**不要写成改法**。
-- 改表、产品语义、成本策略 → 标「需人拍板」,给选项和利弊,不替用户选。
+- **顶部先放「需你拍板」清单**(改表、产品语义、成本策略、抽公共模块、为性能牺牲简洁),给选项和利弊,不替用户选。
+- 改法**只写必要那几行**,匹配周围风格,不重构、不加走不到的兜底;每行改动能追溯到某条发现;列出本次改动制造的孤儿。
+- 有多种合理改法就**并列写取舍**,不静默选一个。
+- 每条写明「改完怎么验」:bug 先给最小复现用例,改之前应失败。
+- 既有的无关死代码进「建议清理」,**只提醒不进改法**;存疑/未判定进「待核实」,**不要写成改法**。
+- 多处一致性问题要指定基准实现(最老的手写代码为准,AI 生成的不作权威)。
 - 方案落盘(如 `review-plan.md`),方便换会话后让别人照着改。
+
+这套标准与 karpathy-guidelines 的「先想再写 / 最简 / 外科式 / 目标驱动」同源;本 skill 不依赖它是否安装,要点已内置。
 
 ## 参考文件(按需读,别一上来全读)
 
