@@ -54,6 +54,8 @@ args: { paths: {app: "/tmp/eval-sample-app"}, project: "...", only: ["dead-code"
 ### 已有的实测记录（0.4.1）
 - 整理类完整跑（`mode: cleanup`，4 个 agent，约 20 万 token）：CLEAN-1/2/3 实质都命中，每条影响面非空；`on_refund`、`parse_model_reply` 找手没报（保守）。
 - 验证员专测（`inject`，1 个 agent，约 5 万 token）：`legacy_format` 成立；`on_refund`（动态调用）、`parse_model_reply`（剥 json）都被正确否掉，理由是验证员自己顺着 `admin_cli → dispatch → getattr` 查出来的。
-- 已知边界：`total_cents` 的简化，验证员在两次实测里给过两种判法（一次成立并提醒行为差异，一次不成立）。它对「行为是否等价」的要求偏严，真简化被否掉的风险在这类边界例上。**本目录结果未纳入自动化**（每次要花额度），改动 `workflow.js` 的 prompt 后手动跑一次。
+- 已知边界（0.4.1）：`total_cents` 的简化，验证员在两次实测里给过两种判法（一次成立并提醒行为差异，一次不成立），对「行为是否等价」偏严。
+- 0.5.0 调整判据后复测（`inject`，1 个 agent，约 5 万 token）：`total_cents` 判**成立**，correction 给出行为等价的保守写法 `sum(o.get('cents', 0) for o in orders)`；`on_refund` 仍判不成立（顺着 `admin_cli → dispatch → getattr` 查出活引用）；`legacy_format` 仍成立。
+  **n=1，只能说明方向对，不能说明稳定**：这类边界例要多跑几次再下结论。**本目录结果未纳入自动化**（每次要花额度），改动 `workflow.js` 的 prompt 后手动跑一次。
 
 另外 `python3 -m pyflakes evals/sample-app/` 应当只报 `undefined name 'reciept'`（BUG-3 的静态可验证部分）。

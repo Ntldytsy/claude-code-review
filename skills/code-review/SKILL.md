@@ -13,8 +13,9 @@ description: Multi-agent adversarial code review — parallel reviewers per dime
 
 ## ⚠️ 第一件事:先算账,再问规模
 
-**实测单价:1 个 agent ≈ 8–12 万 token**(三次真跑:6 agent=688k / 3 agent=211k / 5 agent=403k,
-括号里都是 **agent 总数**,不是维度数)。
+**实测单价与代码量有关:小项目 1 个 agent ≈ 5 万 token,大项目 ≈ 8–12 万**
+(大项目三次真跑:6 agent=688k / 3 agent=211k / 5 agent=403k;约 70 行的靶子:4 agent=204k,
+验证员 1 agent=50k。括号里都是 **agent 总数**,不是维度数)。下表按大项目估,**小项目大约减半**。
 
 ### ⚠️ 换算公式:**agent 数 = 维度数 × 2**
 
@@ -31,7 +32,8 @@ description: Multi-agent adversarial code review — parallel reviewers per dime
 | **跑满默认配置** | **5**(DEFAULT_DIMS 全开) | **10 起** | **~100 万 起** | 接手陌生代码库,且已确认预算够 |
 | 默认 + `security` | 6 | **12** | ~120 万 | 涉敏感面的项目做全量 |
 | 默认 + 两个可选维度 | 7 | **14** | **~140 万** | 除非明确要求,不要走这档 |
-| 默认 + 三个可选维度 | 8 | **16** | **~160 万** | 全部维度(含 `llm-async`)。几乎不该走这档 |
+| 默认 + 全部可选维度 | 9 | **18** | **~180 万** | 含 `security` / `reuse-consistency` / `llm-async` / `tests`。几乎不该走这档 |
+| **加 `shard`** | 维度数 × 分区数 | **成倍** | **成倍** | 大仓库专用:每个维度按 `paths` 分区各起一个找手。2 个分区 = 费用翻倍,务必先报预估 |
 
 > ⚠️ **直接跑未改过的 `workflow.js` = 「跑满默认配置」那行(10 个 agent、约 100 万),不是「标准」那档。**
 > `DEFAULT_DIMS` 有 5 个维度,别把它和表里「标准」那个 4 搞混——一个是维度数、一个是 agent 数。
@@ -65,6 +67,12 @@ description: Multi-agent adversarial code review — parallel reviewers per dime
 **这档不是兜底,是默认。** 操作清单在 `reference/playbook.md` §2.5:
 锚定真源 → `git diff` 拿改动面 → 带符号名搜消费方 → 照 `DEFAULT_DIMS` 的 `focus` 自查 → 跑语法+静态检查。
 
+**自己清死代码/过度设计时**(不起 agent):先**枚举定义**(函数/类/导出/路由/组件/常量/配置项/依赖),
+再对**每个名字**做带符号名的全仓搜索(`rg`,不加文件后缀过滤,命中 0 先自检过滤器),
+命中只有定义本身的才是候选;然后查**动态引用**(字符串拼接名、`getattr`/反射、路由/配置/DI/模板里按名字引用、测试、对外导出)。
+**只搜字面量名字会把动态调用的代码误判成死代码**(`evals/` 里的 `on_refund` 就是这个坑)。
+简化类要写出**行为为什么等价**;说不出来就别说「可以简化」。
+
 这条路径**没有对抗验证**,所以每条结论都要按「什么输入/什么时序 → 什么错误结果」写一遍;
 写不出具体失败场景的,大概率不是真问题。拿不准的标「存疑」,别压成「没问题」。
 
@@ -78,17 +86,33 @@ description: Multi-agent adversarial code review — parallel reviewers per dime
 | `project` | 一段话:项目做什么 / 哪些是不可逆副作用 / 团队标准,**必填** |
 | `known` | 上轮已确认或已拍板不改的问题(不填会让 agent 把旧结论再报一遍) |
 | `only` / `skip` | 选/去默认维度;名字拼错会直接报错 |
-| `extraDims` | 追加 `security` / `reuse-consistency` / `llm-async` |
+| `extraDims` | 追加 `security` / `reuse-consistency` / `llm-async` / `tests` |
 | `inject` | `{维度key: [发现...]}`,跳过该维度找手、直接交验证员(单测验证员/复验用,见 `evals/README.md`) |
 | `mode` | `'cleanup'` = 整理瘦身模式,只跑 `dead-code` + `simplify` |
+| `shard` | `true` = 大仓库按 `paths` 分区分片,每个维度每个分区各起一个找手(**成本成倍**,见成本表) |
 | `diffBase` | 只审 `git diff <base>...HEAD` 的文件 |
 | `dims` | 完全自定义 `[{key, role, focus}]` |
 
+**怎么调用**:用 `Workflow` 工具,`scriptPath` 填本 skill 目录下 `workflow.js` 的绝对路径
+(本 skill 被加载时会给出 Base directory,`workflow.js` 就在它下面),`args` 传上表参数。例:
+
+```
+Workflow({
+  scriptPath: "<skill Base directory>/workflow.js",
+  args: {
+    paths:   { "后端": "/abs/path/backend", "前端": "/abs/path/web" },
+    project: "# 这是什么\n……\n# 本项目的「不可逆副作用」有哪些\n……\n# 团队的明确标准\n……",
+    mode:    "cleanup"            // 或 only: ["backend-bugs"]、diffBase: "main" 等
+  }
+})
+```
+
+⚠️ `Workflow` 工具要求**用户明确同意起多 agent**才能调用——所以上面「先问规模、报预估」不是可选项。
 想固化成项目专属版本时,再复制到 `.claude/workflows/` 改源码里的占位符。
 
 - **`paths` / `project` 没填会直接中止**(脚本自带守卫),不会让一整轮 agent 拿着占位符白跑。
 - **两个可选维度默认不开**(在 `EXTRA_DIMS` 里,传 `args.extraDims` 追加):
-  `security`(涉敏感面时必开,见上)、`reuse-consistency`(同一需求改了多处、或新功能是照着旧功能做的时候开)、`llm-async`(调用大模型生成内容或有慢的异步生成任务时开)。
+  `security`(涉敏感面时必开,见上)、`reuse-consistency`(同一需求改了多处、或新功能是照着旧功能做的时候开)、`llm-async`(调用大模型生成内容或有慢的异步生成任务时开)、`tests`(查「改坏了测试也不会失败」:断言太弱、过度 mock、新行为没测试)。
 - **换技术栈必须换 `DIMS` 的重点清单**。默认那几个维度假设了「ORM+事务」的后端和「SPA 生命周期」的前端;PHP/纯 HTML 项目照跑会整段空转。→ 查 `reference/stack-mapping.md`(索引,指向各栈单独文件)。
 - 改了脚本或 prompt 之后,用 `evals/` 里的靶子回归一次(约 20 万),确认审查没变钝。
 
@@ -98,17 +122,19 @@ description: Multi-agent adversarial code review — parallel reviewers per dime
 
 ### 3. 结果处理
 
-结果分**四桶**,别混着看(为什么是四桶、每桶的完整处置见 playbook「四个桶,四种处理」):
+结果分**四桶**,别混着看(为什么是四桶、每桶的完整处置见 playbook「四个桶,四种处理」)。
+「成立」的发现再按性质分两章:**缺陷**(按 A/B/C 进修复清单)和**整理清单**(可删除 / 可简化,用户逐条决定):
 
-- **确认** → 按 A/B/C 进修复清单
+- **成立** → 缺陷进修复清单;精简类进整理清单
 - **存疑**(读不出结论) → **人工复核第一优先级**,唯一"还没有结论"的一堆
 - **证伪** → 抽查几条;验证员默认立场是否定,错杀不会自己冒出来
 - **未判定**(验证员没返回) → 去 `journal.jsonl` 核原始返回值(实测发生过 14/23 被误标),**≠「没问题」**
 
 - 核 `journal.jsonl` 时**先 `head -c 600` 看一条记录的真实结构再写过滤器**——字段名随版本变,照抄现成命令会返回空,而空最容易被读成「没问题」。
-- 看一眼 `被截断`:非 0 说明这一轮没报全(每维度 8 条上限),要拿全得拆细维度再跑一轮(重新算钱)。
+- 看一眼 `被截断`:非 0 说明这一轮没报全(每维度上限:缺陷 8 条 / 精简 15 条),要拿全就加 `shard` 或拆细 `paths` 再跑一轮(重新算钱)。
 - 看一眼 `失败维度`:非空说明那个维度的**找手没返回**,这个维度根本没审——**0 条≠干净**,要重跑。
 - 跨维度重复的发现已按「同文件、行号 ±3」合并,别名记在 `alsoFoundBy`,两个验证员判定冲突时原样摆出来由人定。
+- **下一轮别重复报**:报告末尾有「候选 known」(返回值里是 `候选known`)。把你决定「保持现状」或「已修」的几行复制进下一轮 `args.known`。
 - 返回值里的 `报告` 是现成的 markdown。**先把它落盘**(如 `review-report.md`),再据此出修改方案(步骤 5);脚本自己写不了文件。
 - 按 **A 阻断 / B 重要 / C 建议** 分组,每条给依据。
 - **这三类不要自己动,一律上交用户拍板**:改数据库表结构、产品语义、成本策略。
@@ -134,6 +160,12 @@ description: Multi-agent adversarial code review — parallel reviewers per dime
 - 方案落盘(如 `review-plan.md`),方便换会话后让别人照着改。
 
 这套标准与 karpathy-guidelines 的「先想再写 / 最简 / 外科式 / 目标驱动」同源;本 skill 不依赖它是否安装,要点已内置。
+
+### 6. 按方案改完之后:复查(可选)
+
+改完想确认「这几条是不是真改对了」,**不用重跑全量**:用 `args.inject` 把当时的发现原样交给验证员(跳过找手),
+`only` 选对应维度,验证员会按**现在**的代码重新核对。约 5 万 token / 1 个 agent。
+也可以直接 `diffBase` 指向改动前的提交,只让审查员看这次改动。
 
 ## 参考文件(按需读,别一上来全读)
 

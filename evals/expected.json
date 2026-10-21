@@ -103,8 +103,8 @@
       },
       {
         "symbol": "total_cents（fix 写成 sum(o['cents'] ...)）",
-        "期望": "不成立，或成立且 correction 给出行为等价的写法",
-        "why": "该替换对缺 cents 抛 KeyError、对 None 抛 TypeError，行为不等价。注意：这是边界例，两次实测验证员给过两种处理（一次成立+补充提醒，一次不成立）"
+        "期望": "成立，且 correction 给出行为等价的保守写法（如 sum(o.get('cents', 0) ...)）；或读不出结论并写明卡在 db 数据形状。**不应**是整条不成立，也不应原样采纳会抛 KeyError 的 sum(o['cents'])",
+        "why": "找手的替换写法对缺 cents 抛 KeyError、对 None 抛 TypeError，行为不等价；但简化方向是对的。0.5.0 起验证员判据：方向对且有等价写法→成立+补等价写法；取决于读不到的数据→读不出结论；能指出具体反例且无等价简化→不成立"
       }
     ]
   }
