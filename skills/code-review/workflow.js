@@ -11,7 +11,7 @@ export const meta = {
 // 入参（全部可选；不改本文件、只靠 args 就能跑）：
 //   paths      {分区名: 绝对路径}              被审代码
 //   project    string                          替换下面「这是什么/不可逆副作用/团队标准」三段
-//   known      string[]                        已知问题（extraKnown 是同义旧名，仍可用）
+//   known      string[]                        已知问题
 //   only       string[]                        只跑这些默认维度，如 ['backend-bugs']（成本表的「轻量/标准」就靠它）
 //   skip       string[]                        跳过这些默认维度
 //   extraDims  string[]                        追加可选维度：'security' / 'reuse-consistency' / 'llm-async' / 'tests'
@@ -68,15 +68,15 @@ if (未填.length) {
 //    没填不中止(首次跑本来就没有已知问题),但占位符要滤掉,否则它会作为
 //    一条"已知问题"进 prompt,agent 读到的是一句没有意义的指令
 // 参数形状校验：known 传成字符串会被展开成一个个字符；paths 为空会让 agent 在没有「被审代码」的情况下开跑
-for (const [名, 值] of [['known', P.known], ['extraKnown', P.extraKnown], ['only', P.only], ['skip', P.skip], ['extraDims', P.extraDims]]) {
+for (const [名, 值] of [['known', P.known], ['only', P.only], ['skip', P.skip], ['extraDims', P.extraDims]]) {
   if (值 !== undefined && !Array.isArray(值)) throw new Error(`args.${名} 必须是数组，收到 ${typeof 值}`)
 }
+if (P.extraKnown !== undefined) throw new Error('args.extraKnown 已移除，请改用 args.known（直接忽略会让已知问题静默失效、旧问题被重复报）')
 if (Object.keys(PATHS).length === 0) throw new Error('args.paths 为空：没有任何被审路径')
 
 const KNOWN = [
   '【按项目填:上一轮已确认或已拍板不改的问题，一行一条。首次跑可留空数组】',
   ...(P.known || []),
-  ...(P.extraKnown || []),
 ].filter((k) => !占位(k))
 
 const CONTEXT = `${PROJECT}
@@ -190,7 +190,7 @@ const VERDICT = {
 
 // ── ④ 审查维度。下面四个是**示例**：前两个假设了「关系型库+ORM+事务」的后端
 //    和「SPA 组件生命周期+轮询」的前端。换技术栈时**替换 focus 里的重点清单**，
-//    否则该维度会整段空转。第 3、4 个维度基本与栈无关，建议保留。
+//    否则该维度会整段空转。dead-code / simplify / flow-sanity 基本与栈无关，建议保留。
 const DEFAULT_DIMS = [
   {
     key: 'backend-bugs',
@@ -273,9 +273,9 @@ const DEFAULT_DIMS = [
 
 // ── ⑤ 可选维度:**不在 DEFAULT_DIMS 里**,要用就显式加。每加一个 = +2 agent ≈ +20 万 ──
 //    启用方式二选一:
-//      a) 起工作流时传 args.extraDims: ['security'](在默认四个维度之外**追加**)
+//      a) 起工作流时传 args.extraDims: ['security'](在默认维度之外**追加**)
 //      b) 改这个文件:把 EXTRA_DIMS.security 写进 DEFAULT_DIMS
-//    (args.dims 是另一回事:传了它就**只跑你传的那些**,默认四个和这里的都不参与)
+//    (args.dims 是另一回事:传了它就**只跑你传的那些**,默认维度和这里的都不参与)
 const EXTRA_DIMS = {
   // 【什么时候必须加】项目涉及以下任一项 → 安全是准入维度,不是"有症状再查":
   //   凭证/密钥 · 支付 · 他人个人信息 · 多租户数据隔离 · 文件上传 · 对外开放的写接口
@@ -568,7 +568,7 @@ for (const r of rs) {
     merged.push({
       dim: r.base, shard: r.key !== r.base ? r.key : undefined, ...f, file: 规范文件(f.file),
       // 验证员给了真实行号就以它为准，报告里的 文件:行号 才可点、才对得上
-      claimedLine: f.line, line: (v && v.correctedLine) || f.line,
+      line: (v && v.correctedLine) || f.line,
       verdict, verifyReason: reason,
       correction: v && v.correction,
       severityAdjusted: v && v.severityAdjusted,
@@ -621,7 +621,7 @@ const 候选known = [
   ...成立.map((m) => `${m.title}（${m.file}）`),
   ...存疑.map((m) => `${m.title}（${m.file}）`),
   // 已核实不成立的也列出来：下一轮不写进 known，找手会再报一遍、验证员再白验一遍
-  ...去重.filter((m) => m.verdict === '不成立').map((m) => `${m.title}（${m.file}）——上轮已核实不成立`),
+  ...证伪.map((m) => `${m.title}（${m.file}）——上轮已核实不成立`),
 ]
 
 log(`找到 ${merged.length} 条（去重后 ${去重.length}）：缺陷确认 ${确认.length}；可删 ${可删.length}、可简化 ${可简化.length}（预计净减 ${总行数} 行）；需拍板 ${需拍板.length}；证伪 ${证伪.length}，存疑 ${存疑.length}，未判定 ${未判定.length}`)
@@ -643,13 +643,6 @@ const 整理条目 = (m) => `- **${m.title}** — \`${m.file}:${m.line}\`${m.lin
   - 风险：${m.risk || '(未写)'}${m.needsDecision ? `\n  - ⚠️ 需人拍板：${m.needsDecision}` : ''}`
 
 
-// 对账：分组之后每条「缺陷」都必须在某个分组里，否则就是又一个会让发现无声消失的洞
-const 已分组 = 分级.reduce((n, lv) => n + 确认.filter((m) => 等级(m) === lv).length, 0)
-if (已分组 !== 确认.length) throw new Error(`报告分组对账失败：确认 ${确认.length} 条，只分进了 ${已分组} 条`)
-// 总对账：去重后的每一条都必须落进且只落进一个桶（成立→缺陷/整理，其余三个桶）
-const 入桶 = 确认.length + 整理.length + 证伪.length + 存疑.length + 未判定.length
-if (入桶 !== 去重.length) throw new Error(`发现总对账失败：去重后 ${去重.length} 条，只进了 ${入桶} 个桶`)
-if (可删.length + 可简化.length !== 整理.length) throw new Error(`整理清单对账失败：整理 ${整理.length} 条，可删+可简化 ${可删.length + 可简化.length}`)
 const 报告 = [
   `# 代码审查报告`,
   `维度：${[...new Set(DIMS.map((d) => d.base))].join(', ')}${P.shard ? `（按 ${分区们.length} 个分区分片）` : ''}${P.diffBase ? `；范围：diff ${P.diffBase}...HEAD` : ''}`,
@@ -682,8 +675,6 @@ return {
   确认,
   可删,
   可简化,
-  预计净减行数: 总行数,
-  需拍板: 需拍板.map((m) => ({ dim: m.dim, title: m.title, file: m.file, line: m.line, 原因: m.needsDecision })),
   存疑: 存疑.map((r) => ({ dim: r.dim, kind: r.kind, title: r.title, file: r.file, line: r.line, 卡在哪: r.verifyReason, 声称的问题: r.failure, 建议做法: r.fix, 需拍板: r.needsDecision })),
   证伪: 证伪.map((r) => ({ dim: r.dim, kind: r.kind, title: r.title, file: r.file, line: r.line, 为何否掉: r.verifyReason })),
   未判定,

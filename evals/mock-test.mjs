@@ -20,6 +20,11 @@ const base = { paths: { a: '/a', b: '/b' }, project: 'p' }
 const bug = (extra) => ({ kind: '缺陷', title: '起点大于终点', file: 'a.py', line: 3, evidence: 'e', failure: 'f', fix: 'x', severity: 'B-重要', ...extra })
 const clean = (extra) => ({ kind: '精简', cleanupType: '删除', title: '死函数', file: 'b.py', line: 1, evidence: 'e', failure: 'f', fix: 'x', severity: 'C-建议', linesSaved: 3, ...extra })
 const verdictN = (prompt, f) => ({ verdicts: Array.from({ length: (prompt.match(/【\d+】/g) || []).length }, (_, i) => ({ index: i + 1, verdict: '成立', reason: 'ok', impactChecked: 'rg → x', ...f })) })
+const mustThrow = async (name, a) => {
+  let threw = false
+  try { await run({ ...base, ...a }, () => null) } catch { threw = true }
+  check(`${name} → 报错`, threw)
+}
 const section = (md, from, to) => md.split(from)[1]?.split(to)[0] ?? ''
 
 let failed = 0
@@ -61,7 +66,7 @@ for (const v of ['C-建议', 'C', 'C级（降级）', '低', '降为C', '随便�
   const { labels } = await run({ ...base, only: ['backend-bugs'], shard: true }, (p, o) => o.label.startsWith('find:') ? { suppressed: 0, findings: [] } : verdictN(p, {}))
   check('shard 2 分区 → 2 个找手', labels.filter((l) => l.startsWith('find:')).length === 2, labels.join(','))
 }
-// 8. 20 条精简发现分 3 批验证，且下标不错位
+// 8. 15 条精简发现分 2 批验证（每批 8 条），且下标不错位
 {
   const many = Array.from({ length: 15 }, (_, i) => clean({ title: `d${i}`, file: `f${i}.py` }))
   const { r, labels } = await run({ ...base, only: ['dead-code'] }, (p, o) => o.label.startsWith('find:') ? { suppressed: 0, findings: many } : verdictN(p, {}))
@@ -69,9 +74,7 @@ for (const v of ['C-建议', 'C', 'C级（降级）', '低', '降为C', '随便�
 }
 // 9. 非法参数直接报错
 for (const [name, a] of [['only 拼错', { only: ['nope'] }], ['mode 非法', { mode: 'x' }], ['inject 非数组', { inject: { 'dead-code': 'x' } }]]) {
-  let threw = false
-  try { await run({ ...base, ...a }, () => null) } catch { threw = true }
-  check(`${name} → 报错`, threw)
+  await mustThrow(name, a)
 }
 
 // ── 0.5.2：全量排查补的回归 ─────────────────────────────────────────────
@@ -108,9 +111,7 @@ for (const [name, a] of [
   ['自定义 dims key 重复', { dims: [{ key: 'x', role: 'r', focus: 'f' }, { key: 'x', role: 'r', focus: 'f' }] }],
   ['diffBase 含 shell 字符', { diffBase: 'main; rm -rf /' }],
 ]) {
-  let threw = false
-  try { await run({ ...base, ...a }, () => null) } catch { threw = true }
-  check(`${name} → 报错`, threw)
+  await mustThrow(name, a)
 }
 // 14. 候选 known 含已证伪的；全员只读规则在 prompt 里
 {
@@ -176,9 +177,7 @@ for (const [v, want] of [['C-建议（不严重）', '### C-建议'], ['C，不�
 for (const [name, a] of [['known 传字符串', { known: '已知A' }], ['paths 为空', { paths: {} }], ['extraDims 传字符串', { extraDims: 'security' }],
   ['dims 未知 kind', { dims: [{ key: 'x', role: 'r', focus: 'f', kind: '乱写' }] }], ['inject 缺 line', { only: ['dead-code'], inject: { 'dead-code': [{ title: 't', file: 'a', evidence: 'e' }] } }],
   ['diffBase 以 - 开头', { diffBase: '-x' }]]) {
-  let threw = false
-  try { await run({ ...base, ...a }, () => null) } catch { threw = true }
-  check(`${name} → 报错`, threw)
+  await mustThrow(name, a)
 }
 // 22. cleanupType 带说明文字也归「可删」
 {
@@ -197,6 +196,22 @@ for (const [name, a] of [['known 传字符串', { known: '已知A' }], ['paths �
   check('存疑条目含声称的问题与建议做法', r.报告.includes('特征描述XYZ') && r.报告.includes('修法ABC'))
   const { r: r2 } = await run({ ...base, only: ['backend-bugs'] }, (p, o) => o.label.startsWith('find:') ? { suppressed: 0, findings: [bug()] } : verdictN(p, { verdict: '不成立' }))
   check('证伪条目含 文件:行号', r2.证伪[0].file && r2.证伪[0].line && r2.报告.split('## 证伪')[1].includes('a.py:3'))
+}
+
+// 25. 已移除的 extraKnown：传了要报错，不能静默忽略
+await mustThrow('extraKnown（已移除）', { extraKnown: ['x'] })
+// 26. 桶总和不变量：每条发现必须落进且只落进一个桶（缺陷/可删/可简化/证伪/存疑/未判定），无论判定怎么写、验证员漏返回几条
+{
+  const items = [
+    bug({ title: 'b1', file: 'f1.py' }), bug({ title: 'b2', file: 'f2.py' }), bug({ title: 'b3', file: 'f3.py' }), bug({ title: 'b4', file: 'f4.py' }),
+    clean({ title: 'c1', file: 'f5.py' }), clean({ title: 'c2', file: 'f6.py', cleanupType: '简化' }), clean({ title: 'c3', file: 'f7.py' }),
+  ]
+  const verdicts = ['成立', '不成立', '成立（部分）', 'SKIP', '成立', '成立', '成立']   // SKIP：验证员漏返回这一条
+  const { r } = await run({ ...base, only: ['dead-code'], inject: { 'dead-code': items } }, () => ({
+    verdicts: verdicts.map((v, i) => v === 'SKIP' ? null : ({ index: i + 1, verdict: v, reason: 'x', impactChecked: i === 6 ? '' : 'rg → x' })).filter(Boolean),
+  }))
+  const 总 = r.确认.length + r.可删.length + r.可简化.length + r.证伪.length + r.存疑.length + r.未判定.length
+  check('桶总和 = 发现总数（7）', 总 === items.length, `确认=${r.确认.length} 可删=${r.可删.length} 可简化=${r.可简化.length} 证伪=${r.证伪.length} 存疑=${r.存疑.length} 未判定=${r.未判定.length}`)
 }
 
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过')
