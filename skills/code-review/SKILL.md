@@ -27,7 +27,7 @@ description: Multi-agent adversarial code review — parallel reviewers per dime
 | **不起 agent** | — | **0** | ~5 万(只是我自己读代码的开销) | 小改动、单个 bug、「这段写得对不对」——**默认走这条** |
 | **轻量** | 1 | **2** | ~20 万 | 只查一个维度(如「只看花钱的地方」)。`args.only: ['backend-bugs']` |
 | **标准** | 2 | **4** | ~40 万 | 一个模块改完了想过一遍。`args.only: ['backend-bugs','flow-sanity']` |
-| **全量** | 3 | **6** | ~60 万 | 大版本前、久没审过。`args.skip` 去掉一个默认维度 |
+| **全量** | 3 | **6** | ~60 万 | 大版本前、久没审过。`args.only` 选三个最相关的维度 |
 | **整理瘦身** | 2(`dead-code` + `simplify`) | **4 起** | **~40 万 起** | **只想删无用代码、简化过度设计**。`args.mode: 'cleanup'`。精简类发现多时验证员会分批(每 8 条一个),所以是「起」 |
 | **跑满默认配置** | **5**(DEFAULT_DIMS 全开) | **10 起** | **~100 万 起** | 接手陌生代码库,且已确认预算够 |
 | 默认 + `security` | 6 | **12** | ~120 万 | 涉敏感面的项目做全量 |
@@ -90,7 +90,7 @@ description: Multi-agent adversarial code review — parallel reviewers per dime
 | `inject` | `{维度key: [发现...]}`,跳过该维度找手、直接交验证员(单测验证员/复验用,见 `evals/README.md`) |
 | `mode` | `'cleanup'` = 整理瘦身模式,只跑 `dead-code` + `simplify` |
 | `shard` | `true` = 大仓库按 `paths` 分区分片,每个维度每个分区各起一个找手(**成本成倍**,见成本表) |
-| `diffBase` | 只审 `git diff <base>...HEAD` 的文件 |
+| `diffBase` | 只审 `git diff <base>...HEAD` 的文件。**要求 `paths` 是 git 工作区**——如果审的是从远端拉下来的无 `.git` 副本，这个参数用不了，别传 |
 | `dims` | 完全自定义 `[{key, role, focus}]` |
 
 **怎么调用**:用 `Workflow` 工具,`scriptPath` 填本 skill 目录下 `workflow.js` 的绝对路径
@@ -111,10 +111,10 @@ Workflow({
 想固化成项目专属版本时,再复制到 `.claude/workflows/` 改源码里的占位符。
 
 - **`paths` / `project` 没填会直接中止**(脚本自带守卫),不会让一整轮 agent 拿着占位符白跑。
-- **两个可选维度默认不开**(在 `EXTRA_DIMS` 里,传 `args.extraDims` 追加):
+- **可选维度默认不开**(在 `EXTRA_DIMS` 里,传 `args.extraDims` 追加):
   `security`(涉敏感面时必开,见上)、`reuse-consistency`(同一需求改了多处、或新功能是照着旧功能做的时候开)、`llm-async`(调用大模型生成内容或有慢的异步生成任务时开)、`tests`(查「改坏了测试也不会失败」:断言太弱、过度 mock、新行为没测试)。
 - **换技术栈必须换 `DIMS` 的重点清单**。默认那几个维度假设了「ORM+事务」的后端和「SPA 生命周期」的前端;PHP/纯 HTML 项目照跑会整段空转。→ 查 `reference/stack-mapping.md`(索引,指向各栈单独文件)。
-- 改了脚本后:**先跑 `node evals/mock-test.mjs`**(零 token,16 项不变量,如「发现不会因为写法不规范而从正文消失」),再改了 prompt 才用 `evals/` 的靶子真跑一次(约 20 万)确认审查没变钝。
+- 改了脚本后:**先跑 `node evals/mock-test.mjs`**(零 token,50 多项不变量,如「发现不会因为写法不规范而从正文消失」「各桶总和等于发现总数」),再改了 prompt 才用 `evals/` 的靶子真跑一次(约 20 万)确认审查没变钝。
 
 **跑期间绝不改文件** —— 验证员要核对行号,一改就全错位,真问题会被误判成「行号对不上 → 不成立」。
 

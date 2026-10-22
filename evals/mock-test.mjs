@@ -74,5 +74,130 @@ for (const [name, a] of [['only 拼错', { only: ['nope'] }], ['mode 非法', { 
   check(`${name} → 报错`, threw)
 }
 
+// ── 0.5.2：全量排查补的回归 ─────────────────────────────────────────────
+// 10. 去重不能让「不成立」吞掉同一处的「成立」（无论谁先出现）
+for (const order of [['backend-bugs', 'security'], ['security', 'backend-bugs']]) {
+  const { r } = await run({ ...base, dims: undefined, only: ['backend-bugs'], extraDims: ['security'] }, (p, o) => {
+    if (o.label.startsWith('find:')) return { suppressed: 0, findings: [bug({ title: `T-${o.label}` })] }
+    const want = o.label === `verify:${order[0]}` ? '不成立' : '成立'
+    return { verdicts: [{ index: 1, verdict: want, reason: 'x' }] }
+  })
+  check(`去重：${order[0]} 先判不成立、${order[1]} 判成立 → 成立的留在缺陷里`, r.确认.length === 1 && r.证伪.length === 0, `确认=${r.确认.length} 证伪=${r.证伪.length}`)
+}
+// 11. 绝对路径与相对路径指向同一文件 → 要能合并；报告里不出现临时副本的绝对路径
+{
+  const { r } = await run({ paths: { 后端: '/tmp/x/be' }, project: 'p', only: ['backend-bugs'], extraDims: ['security'] }, (p, o) => {
+    if (o.label.startsWith('find:')) return { suppressed: 0, findings: [bug({ file: o.label === 'find:security' ? 'services/a.py' : '/tmp/x/be/services/a.py' })] }
+    return verdictN(p, {})
+  })
+  check('绝对/相对路径合并成一条', r.确认.length === 1, `确认=${r.确认.length}`)
+  check('报告里是「分区/相对路径」，不带绝对路径', r.报告.includes('后端/services/a.py') && !r.报告.includes('/tmp/x/be'), r.报告.slice(0, 120))
+}
+// 12. 项目描述/已知问题里的全角【】不能被当成占位符
+{
+  let threw = false, prompt = ''
+  try { await run({ ...base, only: ['backend-bugs'], project: '【内部工具】做视频', known: ['【重要】已知问题A'] }, (p, o) => { if (o.label.startsWith('find:')) { prompt = p; return { suppressed: 0, findings: [] } } return null }) } catch { threw = true }
+  check('project 含「【内部工具】」不误报占位符', !threw)
+  check('known 含「【重要】」没被丢掉', prompt.includes('【重要】已知问题A'))
+}
+// 13. inject / dims / diffBase 校验
+for (const [name, a] of [
+  ['inject 的 key 不在本轮维度', { only: ['backend-bugs'], inject: { simplify: [clean()] } }],
+  ['inject 与 shard 同用', { only: ['dead-code'], shard: true, inject: { 'dead-code': [clean()] } }],
+  ['自定义 dims 缺 focus', { dims: [{ key: 'x', role: 'r' }] }],
+  ['自定义 dims key 重复', { dims: [{ key: 'x', role: 'r', focus: 'f' }, { key: 'x', role: 'r', focus: 'f' }] }],
+  ['diffBase 含 shell 字符', { diffBase: 'main; rm -rf /' }],
+]) {
+  let threw = false
+  try { await run({ ...base, ...a }, () => null) } catch { threw = true }
+  check(`${name} → 报错`, threw)
+}
+// 14. 候选 known 含已证伪的；全员只读规则在 prompt 里
+{
+  let sawReadonly = true
+  const { r } = await run({ ...base, only: ['backend-bugs'] }, (p, o) => {
+    if (!p.includes('不得修改、删除、移动、新建被审路径下的任何文件')) sawReadonly = false
+    return o.label.startsWith('find:') ? { suppressed: 0, findings: [bug()] } : { verdicts: [{ index: 1, verdict: '不成立', reason: 'x' }] }
+  })
+  check('候选 known 含已核实不成立的', r.候选known.some((k) => k.includes('已核实不成立')), JSON.stringify(r.候选known))
+  check('找手/验证员 prompt 都带「只读」硬规矩', sawReadonly)
+}
+
+// ── 0.5.2：独立审查员报告里能复现的问题 ───────────────────────────────────
+// 15. 验证员给了无法识别的判定 → 不能掉出所有桶
+{
+  const { r } = await run({ ...base, only: ['backend-bugs'] }, (p, o) => o.label.startsWith('find:') ? { suppressed: 0, findings: [bug()] } : verdictN(p, { verdict: '成立（部分）' }))
+  check('无法识别的 verdict 进「存疑」，不消失', r.存疑.length === 1 && r.确认.length + r.证伪.length + r.未判定.length === 0, `存疑=${r.存疑.length}`)
+}
+// 16. 相邻行的两个不同问题不能被合并掉（一个 A 级 SQL 注入紧挨一个 C 级竞态）
+{
+  const { r } = await run({ ...base, only: ['backend-bugs'], extraDims: ['security'] }, (p, o) => o.label.startsWith('find:')
+    ? { suppressed: 0, findings: [o.label === 'find:security' ? bug({ title: 'SQL注入', line: 5, severity: 'A-阻断' }) : bug({ title: '竞态', line: 3, severity: 'C-建议' })] }
+    : verdictN(p, {}))
+  check('相邻行的两个问题都保留', r.确认.length === 2 && r.报告.includes('SQL注入') && r.报告.includes('竞态'), r.确认.map((m) => m.title).join(','))
+}
+// 17. 同一行被两个维度报 → 合并，且败者的标题/更严的严重度/needsDecision 不丢
+{
+  const { r } = await run({ ...base, only: ['backend-bugs'], extraDims: ['security'] }, (p, o) => o.label.startsWith('find:')
+    ? { suppressed: 0, findings: [o.label === 'find:security' ? bug({ title: '越权', severity: 'A-阻断', needsDecision: '改鉴权' }) : bug({ title: '缺校验', severity: 'C-建议' })] }
+    : verdictN(p, {}))
+  const m = r.确认[0]
+  check('同一行合并成一条', r.确认.length === 1)
+  const 别名 = (m.alsoFoundBy || []).join()
+  check('合并后取更严的严重度 A', r.报告.includes('[A-阻断'), r.报告.split('\n').filter((l) => l.startsWith('- **[')).join('|'))
+  check('合并后 needsDecision 保留', m.needsDecision === '改鉴权', String(m.needsDecision))
+  check('败者的标题记进别名', 别名.includes('越权') || 别名.includes('缺校验'), 别名)
+}
+// 18. 验证员越界/重复 index 不能盖掉别的批次的真判定
+{
+  const many = Array.from({ length: 10 }, (_, i) => clean({ title: `d${i}`, file: `f${i}.py`, line: 1 }))
+  const { r } = await run({ ...base, only: ['dead-code'] }, (p, o) => {
+    if (o.label.startsWith('find:')) return { suppressed: 0, findings: many }
+    const v = verdictN(p, {})
+    if (o.label === 'verify:dead-code') v.verdicts.push({ index: 9, verdict: '不成立', reason: '越界' })
+    return v
+  })
+  check('越界 index 被丢弃，10 条都成立', r.可删.length === 10 && r.证伪.length === 0, `可删=${r.可删.length} 证伪=${r.证伪.length}`)
+  const { r: r2 } = await run({ ...base, only: ['backend-bugs'] }, (p, o) => o.label.startsWith('find:') ? { suppressed: 0, findings: [bug()] }
+    : { verdicts: [{ index: 1, verdict: '成立', reason: 'a' }, { index: 1, verdict: '不成立', reason: 'b' }] })
+  check('同一 index 矛盾判定 → 读不出结论，不静默取第一个', r2.存疑.length === 1 && r2.确认.length === 0, `存疑=${r2.存疑.length}`)
+}
+// 19. extraDims 重复不会跑两遍
+{
+  const { r, labels } = await run({ ...base, extraDims: ['security', 'security'] }, (p, o) => o.label.startsWith('find:') ? { suppressed: 0, findings: [bug({ title: o.label })] } : verdictN(p, {}))
+  check('extraDims 重复只跑一次', labels.filter((l) => l === 'find:security').length === 1)
+}
+// 20. 严重度归一：开头字母优先，不被「严重/重要」字样带偏
+for (const [v, want] of [['C-建议（不严重）', '### C-建议'], ['C，不重要', '### C-建议'], ['B', '### B-重要'], ['严重', '### A-阻断'], ['高', '### 未分级']]) {
+  const { r } = await run({ ...base, only: ['backend-bugs'] }, (p, o) => o.label.startsWith('find:') ? { suppressed: 0, findings: [bug({ severity: v })] } : verdictN(p, {}))
+  check(`严重度「${v}」归到 ${want}`, r.报告.includes(want), r.报告.split('\n').filter((l) => l.startsWith('### ')).join('|'))
+}
+// 21. 参数形状校验
+for (const [name, a] of [['known 传字符串', { known: '已知A' }], ['paths 为空', { paths: {} }], ['extraDims 传字符串', { extraDims: 'security' }],
+  ['dims 未知 kind', { dims: [{ key: 'x', role: 'r', focus: 'f', kind: '乱写' }] }], ['inject 缺 line', { only: ['dead-code'], inject: { 'dead-code': [{ title: 't', file: 'a', evidence: 'e' }] } }],
+  ['diffBase 以 - 开头', { diffBase: '-x' }]]) {
+  let threw = false
+  try { await run({ ...base, ...a }, () => null) } catch { threw = true }
+  check(`${name} → 报错`, threw)
+}
+// 22. cleanupType 带说明文字也归「可删」
+{
+  const { r } = await run({ ...base, only: ['dead-code'] }, (p, o) => o.label.startsWith('find:') ? { suppressed: 0, findings: [clean({ cleanupType: '删除（整个函数）' })] } : verdictN(p, {}))
+  check('cleanupType「删除（整个函数）」进可删', r.可删.length === 1 && r.可简化.length === 0)
+}
+// 23. 多分区下，绝对路径与「去掉分区前缀的相对路径」仍能合并
+{
+  const { r } = await run({ paths: { 后端: '/tmp/x/be', 前端: '/tmp/x/fe' }, project: 'p', only: ['backend-bugs'], extraDims: ['security'] }, (p, o) => o.label.startsWith('find:')
+    ? { suppressed: 0, findings: [bug({ file: o.label === 'find:security' ? 'services/a.py' : '/tmp/x/be/services/a.py' })] } : verdictN(p, {}))
+  check('多分区：绝对/相对路径合并', r.确认.length === 1, `确认=${r.确认.length}`)
+}
+// 24. 存疑/证伪/未判定 的条目带够信息（不用回 journal 翻）
+{
+  const { r } = await run({ ...base, only: ['backend-bugs'] }, (p, o) => o.label.startsWith('find:') ? { suppressed: 0, findings: [bug({ failure: '特征描述XYZ', fix: '修法ABC' })] } : verdictN(p, { verdict: '读不出结论' }))
+  check('存疑条目含声称的问题与建议做法', r.报告.includes('特征描述XYZ') && r.报告.includes('修法ABC'))
+  const { r: r2 } = await run({ ...base, only: ['backend-bugs'] }, (p, o) => o.label.startsWith('find:') ? { suppressed: 0, findings: [bug()] } : verdictN(p, { verdict: '不成立' }))
+  check('证伪条目含 文件:行号', r2.证伪[0].file && r2.证伪[0].line && r2.报告.split('## 证伪')[1].includes('a.py:3'))
+}
+
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过')
 process.exit(failed ? 1 : 0)
