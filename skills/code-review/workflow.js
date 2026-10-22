@@ -166,7 +166,7 @@ const VERDICT = {
           },
           reason: { type: 'string', description: '你读了哪些行、为什么确认或否掉' },
           correction:       { type: 'string', description: '若原描述(含行号)有误但问题仍成立，写出准确描述' },
-          severityAdjusted: { type: 'string' },
+          severityAdjusted: { type: 'string', enum: ['A-阻断', 'B-重要', 'C-建议'], description: '只有你认为找手的严重度不对时才填；只能是这三个值之一（不要写「C」「低」「降为C级」这类自由文本）' },
           correctedLine:    { type: 'integer', description: '若找手报的行号有偏差，这里写真实的起始行号（报告会采用它）；没偏差就省略' },
           // 精简类的验证员必须自己搜一遍并写在这里；空的话汇总时会把「成立」降级成「读不出结论」
           impactChecked:    { type: 'string', description: '精简类必填：你自己做的消费方搜索——命令、命中结果、动态引用检查结论' },
@@ -536,7 +536,7 @@ if (未判定.length) log(`⚠️ ${未判定.length} 条没拿到判定，去 j
 if (被截断) log(`⚠️ 另有 ${被截断} 条因每维度上限没报上来（缺陷 ${CAP.缺陷} / 精简 ${CAP.精简}）。要拿全就按分区拆细再跑一轮`)
 
 // 现成的 markdown 报告：脚本里没有写文件的能力，由调用方（SKILL.md 步骤 3）把它落盘，再据此出修改方案
-const 条目 = (m) => `- **[${m.severityAdjusted || m.severity}] ${m.title}** — \`${m.file}:${m.line}\`（${m.dim}${m.alsoFoundBy ? `；另被 ${m.alsoFoundBy.join('、')} 报出` : ''}）
+const 条目 = (m) => `- **[${等级(m)}${m.severityAdjusted && 归一(m.severityAdjusted) !== 归一(m.severity) ? `，验证员由 ${m.severity} 调整` : ''}] ${m.title}** — \`${m.file}:${m.line}\`（${m.dim}${m.alsoFoundBy ? `；另被 ${m.alsoFoundBy.join('、')} 报出` : ''}）
   - 失败场景：${m.failure}
   - 验证：${m.verifyReason}${m.correction ? `\n  - 修正：${m.correction}` : ''}
   - 最简修法：${m.fix}${m.alternatives ? `\n  - 其他改法与取舍：${m.alternatives}` : ''}${m.impact ? `\n  - 影响面：${m.impact}` : ''}${m.needsDecision ? `\n  - ⚠️ 需人拍板：${m.needsDecision}` : ''}`
@@ -546,7 +546,21 @@ const 整理条目 = (m) => `- **${m.title}** — \`${m.file}:${m.line}\`${m.lin
   - 影响面（验证员实查）：${m.impactChecked || '(未写)'}
   - 怎么做：${m.correction ? `${m.fix}\n  - 验证员补充：${m.correction}` : m.fix}${m.alternatives ? `\n  - 其他做法与取舍：${m.alternatives}` : ''}
   - 风险：${m.risk || '(未写)'}${m.needsDecision ? `\n  - ⚠️ 需人拍板：${m.needsDecision}` : ''}`
-const 分级 = ['A-阻断', 'B-重要', 'C-建议']
+// 严重度归一：验证员/找手即使写了「C」「C级」「低」，也必须落进某个分组，不能让发现因为写法不规范而从正文消失
+const 归一 = (v) => {
+  const t = String(v || '').trim()
+  if (!t) return null
+  if (/^A|阻断|严重|致命/i.test(t)) return 'A-阻断'
+  if (/^B|重要|中/i.test(t)) return 'B-重要'
+  if (/^C|建议|低|轻微/i.test(t)) return 'C-建议'
+  return null
+}
+const 等级 = (m) => 归一(m.severityAdjusted) || 归一(m.severity) || '未分级'
+const 分级 = ['A-阻断', 'B-重要', 'C-建议', '未分级']
+
+// 对账：分组之后每条「缺陷」都必须在某个分组里，否则就是又一个会让发现无声消失的洞
+const 已分组 = 分级.reduce((n, lv) => n + 确认.filter((m) => 等级(m) === lv).length, 0)
+if (已分组 !== 确认.length) throw new Error(`报告分组对账失败：确认 ${确认.length} 条，只分进了 ${已分组} 条`)
 const 报告 = [
   `# 代码审查报告`,
   `维度：${[...new Set(DIMS.map((d) => d.base))].join(', ')}${P.shard ? `（按 ${分区们.length} 个分区分片）` : ''}${P.diffBase ? `；范围：diff ${P.diffBase}...HEAD` : ''}`,
@@ -556,7 +570,7 @@ const 报告 = [
   需拍板.length ? `\n## ⚠️ 需你拍板（${需拍板.length}）\n${需拍板.map((m) => `- **${m.title}** — \`${m.file}:${m.line}\`：${m.needsDecision}${m.alternatives ? `（可选做法：${m.alternatives}）` : ''}`).join('\n')}` : '',
   `\n## 缺陷（${确认.length}）`,
   ...分级.map((lv) => {
-    const xs = 确认.filter((m) => (m.severityAdjusted || m.severity) === lv)
+    const xs = 确认.filter((m) => 等级(m) === lv)
     return xs.length ? `\n### ${lv}\n${xs.map(条目).join('\n')}` : ''
   }),
   `\n## 整理清单·可删除的代码（${可删.length}）`,

@@ -8,6 +8,17 @@
     2 个「看着可删其实不能删」的诱饵（`on_refund` 靠 `getattr` 动态调用、`parse_model_reply` 剥 ```json 包裹）。
 - `expected.json`：标准答案。
 
+## 零成本的脚本回归：`mock-test.mjs`
+
+```bash
+node evals/mock-test.mjs
+```
+
+用假的 `agent()`/`pipeline()` 驱动 `workflow.js`，**不花 token**，检查「发现不会无声消失」这类不变量：
+验证员把严重度写成 `C`/`C级`/`低` 仍在报告正文、找手没返回会记进失败维度、缺 `impactChecked` 的精简类不进「可删」、
+`inject`/`shard`/分批验证/非法参数等。**改了 `workflow.js` 先跑它**；它测不了 prompt 质量，那要靠下面的真评测。
+`WORKFLOW=<路径>` 可指定别的版本（修 bug 前用旧版本跑一遍，确认测试真的能抓到它）。
+
 ## ⚠️ 必须在临时副本上跑
 
 答案在 `expected.json`/本 README 里。验证员会做全仓 `rg`，如果审查目录能扫到本目录，就会读到答案——
