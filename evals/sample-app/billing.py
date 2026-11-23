@@ -1,4 +1,5 @@
 """订单扣费与退款。"""
+import json
 import time
 
 class GatewayTimeout(Exception):
@@ -85,3 +86,44 @@ def parse_model_reply(text):
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0]
     return text
+
+
+class Batch:
+    def __init__(self):
+        self.items = []
+        self.count = 0
+
+    def add(self, order_id):
+        self.items.append(order_id)
+        self.count += 1
+
+class OrderState:
+    def __init__(self):
+        self.is_paid = False
+        self.is_refunded = False
+        self.is_failed = False
+
+def mark(state, kind):
+    state.is_paid = kind == "paid"
+    state.is_refunded = kind == "refunded"
+    state.is_failed = kind == "failed"
+    return state
+
+def order_report(db):
+    rows = []
+    for oid, o in db.orders.items():
+        refunds = db.refund_count(oid)
+        rows.append((oid, o["cents"], refunds))
+    return rows
+
+def channel_fees(db, channels):
+    fees = {}
+    for ch in channels:
+        fees[ch] = db.fee_for(ch)
+    return fees
+
+def load_meta(raw):
+    return json.loads(raw or "{}")
+
+def load_tags(raw):
+    return json.loads(raw or "[]")

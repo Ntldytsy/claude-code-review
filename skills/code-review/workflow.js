@@ -38,6 +38,9 @@ const PROJECT_BODY = P.project || `
 
 # 团队的明确标准
 【按项目填:引用你自己说过的原话，例如"只要满足要求的最简单方案""过度设计本身就是缺陷"】
+
+# 规模（性能判断要用）
+【按项目填:用户数 / 数据量 / 并发峰值 / 是否单机；不知道就写"未知"。性能维度会据此估算代价，没写只能从配置里推断】
 `
 const PROJECT = `
 # 被审代码
@@ -121,7 +124,22 @@ const OUT_CLEAN = `# 输出要求（精简类：死代码 / 冗余 / 过度设�
   被其他仓库引用。应用内部函数/脚本没有这些迹象，就不要写 needsDecision，在 risk 里写「低」即可。
   needsDecision 只留给真要人拍板的（抽公共模块、行为会变、对外契约）
 - **为「让常见情况成功」而写的处理要留，不报**（如解析模型输出前剥掉 \`\`\`json 包裹）；只有「防不可能发生的情形 / 已被外层兜住」才算冗余
+- **先找现成的**：对要新增/保留的东西，先看项目里有没有现成的能直接用；写进 fix 时优先「复用现成」
+- **净减 ≤0 行且没有可读性收益的合并/抽取不报**；看着重复但默认值/写回格式/可信度/语义不同的不合并；为兼容老数据/老命令保留的逐字行为不动；文件头写明有意设计的不报
 - 不报纯命名/缩进/引号偏好；不报上面已列出的`
+
+const OUT_PERF = `# 输出要求（性能类）
+性能问题**没有失败场景，也不是写法问题**——它的依据是「代价估算」。只报**在本项目实际规模下可感知**的：
+- 所有发现 kind 填「性能」
+- **costEstimate 必填**：触发频率 × 单次代价 × 规模，每个数都写来源。频率看调用路径（是用户操作的热路径，还是偶尔才跑的后台/管理页？）；
+  规模看「这是什么」里的描述，没写就读配置/部署文件推断（连接池大小、是否同机数据库、有没有分页上限），**推断的要在 scaleBasis 里明说**
+- 估算出来**不可感知**（单次远低于人能感觉到的阈值、又不叠加、不在热路径）的**不要报**——别因为「理论上 O(N²)」就报，
+  先问「N 在这个项目里最大是多少」
+- 修法要写清复杂度变化：complexityDelta（净增/净减行数）。**优化同时让代码更简单（删掉多余查询/字段）的优先**；
+  要让代码明显更复杂才换来的性能，needsDecision 写「简洁 vs 性能」，**不擅自要求优化**
+- 只报性能代价；会出错的放缺陷、该删该简化的放精简，**不要重复报**
+- 看起来慢、但文件头/注释写明是有意取舍的，不报；不报「建议加缓存」这类没有具体代价的泛泛之谈
+- 不报上面已列出的`
 
 const findingsSchema = (cap) => ({
   type: 'object',
@@ -136,7 +154,7 @@ const findingsSchema = (cap) => ({
         type: 'object',
         required: ['kind', 'title', 'file', 'line', 'evidence', 'failure', 'fix', 'severity'],
         properties: {
-          kind:     { type: 'string', enum: ['缺陷', '精简'], description: '缺陷=会出错；精简=死代码/冗余/过度设计，不出错但该删或该简化' },
+          kind:     { type: 'string', enum: ['缺陷', '精简', '性能'], description: '缺陷=会出错；精简=死代码/冗余/过度设计，不出错但该删或该简化；性能=有可估算的性能代价（不是缺陷也不是写法问题）' },
           title:    { type: 'string', description: '一句话说清问题' },
           file:     { type: 'string' },
           line:     { type: 'integer' },
@@ -147,7 +165,10 @@ const findingsSchema = (cap) => ({
           impact:        { type: 'string', description: '缺陷：动到别人依赖的什么+消费方。**精简：必填**，写「搜了什么 → 命中什么」，含动态引用检查结果' },
           needsDecision: { type: 'string', description: '真需要人拍板的原因（改表/产品语义/成本策略/抽公共模块/为性能牺牲简洁/**有迹象表明是对外 API**）；不需要就留空。别因为"理论上可能被外部调用"就填' },
           cleanupType:   { type: 'string', enum: ['删除', '简化'], description: '精简类：整段删掉=删除；留着但换更简单的写法=简化（决定报告里归到「可删除」还是「可简化」）' },
-          linesSaved:    { type: 'integer', description: '精简类：预计净减少行数' },
+          linesSaved:    { type: 'integer', description: '精简类：估算的净减少行数（模型估的，改完要用 git diff --stat 实测，别当精确值）' },
+          costEstimate:  { type: 'string', description: '性能类必填：代价估算 = 触发频率 × 单次代价 × 数据/用户规模，写出每个数的来源（代码里读到的上限、配置、project 描述里的规模）。算不出就写算不出的原因' },
+          scaleBasis:    { type: 'string', description: '性能类必填：你假设的项目规模从哪来（project 描述里写了 / 配置或部署文件里读到 / 推断）。推断的要明说是推断' },
+          complexityDelta: { type: 'integer', description: '性能类：修法让代码净增（正）或净减（负）多少行；负数说明优化同时也是简化' },
           risk:          { type: 'string', description: '精简类：风险（低/中/高 + 原因）' },
           severity: { type: 'string', enum: ['A-阻断', 'B-重要', 'C-建议'], description: '精简类一般填 C-建议' },
         },
@@ -155,7 +176,7 @@ const findingsSchema = (cap) => ({
     },
   },
 })
-const CAP = { 缺陷: 8, 精简: 15 }
+const CAP = { 缺陷: 8, 精简: 15, 性能: 8 }
 
 const VERDICT = {
   type: 'object',
@@ -182,6 +203,7 @@ const VERDICT = {
           correctedLine:    { type: 'integer', description: '若找手报的行号有偏差，这里写真实的起始行号（报告会采用它）；没偏差就省略' },
           // 精简类的验证员必须自己搜一遍并写在这里；空的话汇总时会把「成立」降级成「读不出结论」
           impactChecked:    { type: 'string', description: '精简类必填：你自己做的消费方搜索——命令、命中结果、动态引用检查结论' },
+          costChecked:      { type: 'string', description: '性能类必填：你自己复算的代价——频率 × 单次 × 规模 = 结果 → 体感；规模若是推断要说明' },
         },
       },
     },
@@ -204,7 +226,7 @@ const DEFAULT_DIMS = [
 - 外部调用的容错：一次网络抖动会不会丢掉一个"已经产生不可逆副作用"的任务
 - 写入前的字段约束：目标列的类型/长度/序列化方式（JSON 列要序列化、严格模式下超长是**报错而非截断**），别拿另一个字段的经验套这个字段
 - 位置耦合与写死常量：按位置取值的硬下标、写死的尺寸/上限/magic number——上游一变就静默错位
-- 性能（只报明显的，C 级，且 needsDecision 写明"简洁 vs 性能"，**不要擅自要求优化**）：N+1、能在数据层一次解决却在内存里循环、无谓的全量扫描`,
+- 性能代价（N+1、内存里循环、全量扫描等）**不在这里报**——它们没有失败场景，放这里只会被判不成立。需要查就开 \`performance\` 可选维度；这里只报会出错的`,
   },
   {
     key: 'frontend-bugs',
@@ -243,19 +265,44 @@ const DEFAULT_DIMS = [
   {
     key: 'simplify',
     kind: '精简',
-    role: '简化审查员。AI 写的代码常常过度复杂；找**可以更简单、且行为等价**的代码',
+    role: '简化审查员。AI 写的代码常常过度复杂：明明有更简单直接的办法，却加一个状态、一个新变量、一个新 prop，或者用更复杂的写法。找**可以更简单、且行为等价**的代码',
     focus: `判据：「一个资深工程师会不会说这过度复杂了？」「删掉/内联它，结果变不变？」不变就该报。
+
+**先找现成的（最重要的一步）**：对每个新增的变量、状态、prop、事件、函数，先在同一文件和项目里找——有没有**现成的**变量/事件/计算属性/工具函数能直接用？
+优先「复用现成」，其次才是「新增」。也先想**使用者最简单的思路**（比如一个标志位）能不能成，别绕开它去设计更重的方案。
+
+**状态与数据流层面（AI 最常犯、也最容易漏）**
+- 派生状态被存成独立状态：值恒等于另一个值/表达式（如 \`n\` 恒等于 \`list.length\`、\`ready\` 恒等于 \`init != null\`）——改成现算
+- 几个互斥的布尔/ref 其实是一个枚举（如 adjusting/activeSub/activeCustom/activeMask 四个只能一个为真）
+- 把 props/入参拷成一堆本地变量，再逐个同步、逐个拼回去；同类数据用一个对象就够
+- 为了「恢复原状」再存一份旧状态——换一种不需要恢复的做法
+- 多个结构完全一样的一行函数/处理器（saveA/saveB/saveC…）合成一个带 key 的
+- 前后端/层与层之间逐字段展开再重组（如 9 个 subtitle_*），而不是传一个对象
+- 别名变量、只转发的中间变量、仅为转一手而存在的事件/prop（先看项目惯例是不是本来就直接改）
+- 同一数据在一次操作里被取两遍/保存两遍、没变也保存；重复写两遍的键列表；被后面样式覆盖掉的死样式/死配置
+
+**代码结构层面**
 - 只有一处使用的 helper/函数/类/抽象层/配置项/参数/开关——可以内联
-- 只为一个两行函数而存在的模块、多层转发/包装、一层包一层
+- 只为一个两行函数而存在的模块、多层转发/包装
+- 同一逻辑的多份实现（含逐字复制的分支），以及它们已漂移出的差异——合并成一份；
+  **手写了项目里已有的工具函数/框架/标准库现成就有的能力**（如另一个文件里早有同样的函数）
 - 为不可能场景写的防御：不会发生的 null/类型判断、已被外层兜住的 try/catch
-- 同一逻辑的多份实现（含逐字复制的分支），以及它们已漂移出的差异——合并成一份
 - 为假设需求预留、至今没有使用者的抽象与配置
-- 能在数据层一次解决的事，却在内存里多轮循环/多层转换；手写了框架/标准库现成就有的能力
-- 绕远路：先转成 A 再转成 B 只为拿到 A；冗余的中间变量/状态/缓存；一次性使用的临时结构
-- 过长的函数：50 行能写成 15 行且行为不变
+- 绕远路：先转成 A 再转成 B 只为拿到 A；冗余的中间变量/缓存；一次性使用的临时结构
+- 过长的函数：50 行能写成 15 行且行为不变；两个只差几个参数的组件可以合并（净减行数要实打实）
 - 简化后必须**行为等价**——写出等价依据；做不到等价的不报
-- ⚠️ 排除项：「让常见情况成功」的处理要留；已有 ≥2 处真实复用且抽取合理的不报；
-  纯命名/缩进/引号偏好不报。跨文件抽公共模块要 needsDecision（先与协作方确认）`,
+
+**⚠️ 误报防线（这些别报，来自真实项目里反复被你否掉的）**
+- **净减 ≤0 行的合并/抽取不报**：「抽成公共函数反而多一行」是常态。简化的收益要看得见
+- **纯语法糖改写不算简化**：循环改推导式、if/else 改三元、for 改 map 这类只是换种写法，行数和可读性没有实质变化，不报
+- **看着重复但其实不同的不合并**：默认值不同、写回的格式不同（如 JSON 的 ensure_ascii）、输入可信度不同（宽松清洗 vs 严格校验）、
+  边界/常量各不同、语义不同的几套轮询——合并后要加参数/分支，反而更长更难读
+- **为兼容老数据/老命令/老指纹/已存库的格式而保留的逐字行为，不动**（改了会让旧项目的签名、旧成片的命令变）
+- **文件头或注释写明是有意设计的**，不报（如「不校验归属是有意的，同 Prompt 管理」）
+- **项目惯例优先于通用规则**：先看项目里同类做法——如果项目惯例就是子组件直接改父组件的响应式对象，别因为 lint 的「不要改 prop」去要求加事件
+- 「让常见情况成功」的处理要留（如剥掉 \`\`\`json 包裹）
+- **性能代价类的不在这里报**（那是 \`performance\` 维度的事：性能不是写法）
+- 纯命名/缩进/引号偏好不报；跨文件抽公共模块要 needsDecision（先与协作方确认）`,
   },
   {
     key: 'flow-sanity',
@@ -304,6 +351,23 @@ const EXTRA_DIMS = {
 - 哨兵/特殊标记值是否贴合存储字段的类型（JSON 列存序列化、字符串列存裸串），别混
 - 模型输出解析：是否处理了代码块包裹等高频格式；解析失败时是报错还是吞掉继续
 - 付费调用的重试：超时/抖动重试会不会对"已经产生不可逆副作用"的调用重复扣费`,
+  },
+
+  // 【什么时候加】想查性能代价（用户感知的慢、多余的查询/请求、无谓的大对象传输）。**务必在 project 里写清规模**（用户数/数据量/并发），
+  // 否则验证员只能靠配置推断规模，估算会不准
+  performance: {
+    key: 'performance',
+    kind: '性能',
+    role: '性能审查员。找**在本项目实际规模下可感知**的性能代价，每条都要给出可复算的代价估算。不找缺陷、不找写法偏好',
+    focus: `- N+1：循环里逐个查库/调接口，本可一次批量取
+- 本该在数据层一次解决（过滤/聚合/分页/计数），却把整表/整列表取回内存再处理
+- 同一份数据在一次操作里被取两遍/算两遍/保存两遍（重复查询、重复请求、没变也保存）
+- 把整份大对象（整份 JSON、完整列表）返回给只用其中几个字段的调用方
+- 热路径上的同步阻塞（异步框架里的同步 IO）、长时间占用连接/锁，**仅当规模下会真的排队**
+- 高频查询缺索引（**看得到 schema/迁移时才报**，看不到就别猜）
+- 无界增长：缓存/列表/日志/临时文件没有上限，且会真的持续积累
+- 前端：无谓的重渲染、大列表无虚拟化、定时器过密、重复请求、没必要的整页刷新
+- ⚠️ 每条必须带 costEstimate（频率×单次×规模）。「理论上不好」不算；规模下不可感知的不报`,
   },
 
   // 【什么时候加】改了行为却不确定有没有测试兜住、或代码是 AI 写的而测试也是 AI 写的
@@ -357,7 +421,7 @@ if (P.dims) {
   const seen = new Set()
   P.dims.forEach((d, i) => {
     if (!d || !d.key || !d.role || !d.focus) throw new Error(`args.dims[${i}] 必须有 key / role / focus`)
-    if (d.kind && !['缺陷', '精简'].includes(d.kind)) throw new Error(`args.dims[${i}].kind 只能是「缺陷」或「精简」，收到 "${d.kind}"`)
+    if (d.kind && !['缺陷', '精简', '性能'].includes(d.kind)) throw new Error(`args.dims[${i}].kind 只能是「缺陷」「精简」或「性能」，收到 "${d.kind}"`)
     if (seen.has(d.key)) throw new Error(`args.dims 里 key "${d.key}" 重复（key 用来匹配结果，必须唯一）`)
     seen.add(d.key)
   })
@@ -393,7 +457,7 @@ const DIMS = 展开.map((d) => {
     prompt: `你是${d.role}。
 ${CONTEXT}
 ${d.part ? `# 本分片（重要）\n你只负责分区「${d.part.名}」：${d.part.路径}。**只报这个分区里的问题**；\n查调用方/引用时可以读其他分区，但问题本身必须落在本分区的文件上。其他分区由别的审查员负责。\n` : ''}
-${kind === '精简' ? OUT_CLEAN : OUT_BUG}
+${kind === '精简' ? OUT_CLEAN : kind === '性能' ? OUT_PERF : OUT_BUG}
 
 重点看这些地方（先读代码再下结论）：
 ${d.focus}
@@ -436,20 +500,42 @@ const 判据精简 = `【kind=精简 的判法】（死代码/冗余/过度设�
 6. 无法排除动态引用/对外 API/跨仓库调用 → **读不出结论**，在 reason 里写清卡在哪，
    不要压成「不成立」——它是「不确定能不能删」，要留给人决定
 7. 找手贴的代码必须能在真实文件里逐字找到；找不到 → **不成立**，写明"证据在文件中不存在"
-8. 行号偏差不算否掉的理由：同一文件邻近位置能找到就算数，真实起始行号填 **correctedLine**，其余写进 correction`
+8. 行号偏差不算否掉的理由：同一文件邻近位置能找到就算数，真实起始行号填 **correctedLine**，其余写进 correction
+9. **净减行数你自己估一遍**：合并/抽取后总行数不减反增、也没有明显的可读性收益 → **不成立**（「抽成函数反而多一行」）
+10. **看着重复但其实不同** → **不成立**：默认值不同、写回格式不同（JSON ensure_ascii 之类）、输入可信度不同（宽松清洗 vs 严格校验）、
+    边界常量不同、语义不同的几套轮询。合并要加参数/分支才行的，不算简化
+11. **为兼容老数据/老命令/老指纹/已存库格式而保留的行为** → **不成立**（改了会让旧数据对不上），除非能证明改后输出逐字不变
+12. **文件头/注释写明是有意设计**（如「不校验归属是有意的」）→ **不成立**
+13. **项目惯例优先于通用规则**：先读项目里同类做法；找手拿通用规则（如 lint 的「不要改 prop」）要求改、但项目里本来就普遍这么写 → **不成立**
+14. 这是**性能代价**而不是写法问题 → **不成立**（那属于 performance 维度），不要在这里放行`
+
+const 判据性能 = `【kind=性能 的判法】（性能没有失败场景，**不要**因为「推演不出出错」就否掉；也不要因为「理论上不好」就放过——看**代价是否可感知**）
+你的任务是**证伪「这个性能代价值得处理」**：
+1. **自己复算代价，不要采信找手的 costEstimate**：读调用路径，确认触发频率（用户操作的热路径？还是偶尔的后台/管理页？）、
+   数据规模（来源、上限、有没有分页）、单次代价（几次主键查询？几 KB 还是几 MB？）。把「频率 × 单次 × 规模 = 结果 → 体感」写进 **costChecked**（必填）
+2. 规模以 project 描述为准；没写就读配置/部署文件（连接池、是否同机、用户数量级）推断，并在 costChecked 里说明是推断
+3. 复算出来**不可感知**（远低于人能感觉到的阈值，又不叠加、不在热路径）→ **不成立**，写明数字
+4. 修法会让代码**明显更复杂**，而收益在该规模下不可感知 → **不成立**
+5. 修法本身就是简化（删多余查询/字段，complexityDelta 为负）且代价属实 → **成立**，哪怕代价很小
+6. 代价可感知（热路径、规模大、会叠加）→ **成立**，把你复算的数字写进 correction；保留 needsDecision（「简洁 vs 性能」）
+7. 规模你读不到、又会决定结论（比如不知道项目有几个用户）→ **读不出结论**，在 reason 里写「需要你在 project 里补充规模：…」
+8. 文件头/注释写明是有意取舍 → **不成立**
+9. 找手贴的代码必须能在真实文件里逐字找到；找不到 → **不成立**
+10. 行号偏差不算否掉的理由，真实行号填 **correctedLine**`
 
 const 验证一批 = (d, 批, 偏移) => {
   const numbered = 批
     .map((f, i) => `【${i + 1}】[kind=${f.kind || d.kind}] ${f.title}
   文件: ${f.file}:${f.line}
   证据: ${f.evidence}
-  ${f.kind === '精简' ? '留着的代价' : '声称的失败场景'}: ${f.failure}
-  ${f.kind === '精简' ? '找手声称的影响面(仅供参考，必须自己重查)' : '影响面'}: ${f.impact || '(未写)'}
+  ${f.kind === '精简' ? '留着的代价' : f.kind === '性能' ? '性能代价' : '声称的失败场景'}: ${f.failure}
+  ${f.kind === '精简' ? '找手声称的影响面(仅供参考，必须自己重查)' : '影响面'}: ${f.impact || '(未写)'}${f.kind === '性能' ? `\n  找手的代价估算(仅供参考，必须自己复算): ${f.costEstimate || '(未写)'}\n  找手假设的规模: ${f.scaleBasis || '(未写)'}\n  修法复杂度变化: ${f.complexityDelta ?? '(未写)'} 行` : ''}
   建议改法: ${f.fix}
   自评严重度: ${f.severity}`)
     .join('\n\n')
   const 含精简 = 批.some((f) => (f.kind || d.kind) === '精简')
   const 含缺陷 = 批.some((f) => (f.kind || d.kind) === '缺陷')
+  const 含性能 = 批.some((f) => (f.kind || d.kind) === '性能')
   return agent(
     `你是对抗性验证员，任务是**尽力证伪**下面这些声称的问题。默认立场：不成立。
 ${CONTEXT}
@@ -457,7 +543,7 @@ ${CONTEXT}
 
 ${numbered}
 
-${含缺陷 ? 判据缺陷 + '\n\n' : ''}${含精简 ? 判据精简 + '\n\n' : ''}通用：
+${含缺陷 ? 判据缺陷 + '\n\n' : ''}${含精简 ? 判据精简 + '\n\n' : ''}${含性能 ? 判据性能 + '\n\n' : ''}通用：
 - **读了相关代码，但证据不足以判断**（缺上下文、依赖运行时配置、要跨仓库才能确认）→ **读不出结论**，
   并在 reason 里写清卡在哪。**不要把这种情况压成"不成立"**——压了就会和真正的假阳性混在一起，人工抽查时无从下手。
 - 上面的"证据"是另一个 agent 写的，**可能是它编的**。
@@ -492,7 +578,7 @@ const results = await pipeline(
     if (!found || !Array.isArray(found.findings)) {
       return { key: d.key, base: d.base, findings: [], verdicts: [], suppressed: 0, finderFailed: true }
     }
-    const list = found.findings.map((f) => ({ ...f, kind: ['缺陷', '精简'].includes(f.kind) ? f.kind : d.kind }))
+    const list = found.findings.map((f) => ({ ...f, kind: ['缺陷', '精简', '性能'].includes(f.kind) ? f.kind : d.kind }))
     const suppressed = found.suppressed || 0
     if (!list.length) return { key: d.key, base: d.base, findings: [], verdicts: [], suppressed }
     const 批们 = []
@@ -565,6 +651,11 @@ for (const r of rs) {
       verdict = '读不出结论'
       reason = `验证员判了成立但没写 impactChecked（没有自己做影响面搜索），不能直接当"可以删"。${reason}`
     }
+    // 性能类的「成立」同理：必须带验证员自己复算的代价，没写等于没复算，降级
+    if (f.kind === '性能' && verdict === '成立' && !(v.costChecked || '').trim()) {
+      verdict = '读不出结论'
+      reason = `验证员判了成立但没写 costChecked（没有自己复算代价），不能直接当「值得优化」。${reason}`
+    }
     merged.push({
       dim: r.base, shard: r.key !== r.base ? r.key : undefined, ...f, file: 规范文件(f.file),
       // 验证员给了真实行号就以它为准，报告里的 文件:行号 才可点、才对得上
@@ -573,6 +664,7 @@ for (const r of rs) {
       correction: v && v.correction,
       severityAdjusted: v && v.severityAdjusted,
       impactChecked: v && v.impactChecked,
+      costChecked: v && v.costChecked,
     })
   })
 }
@@ -601,7 +693,8 @@ for (const m of merged) {
 // 两者都不等于"没问题"，但卡住的原因不同，处理方式也不同
 const 成立   = 去重.filter((m) => m.verdict === '成立')
 // 缺陷与精简分开呈现：精简类是一份**整理清单**（用户据此删代码、简化代码），不与缺陷修复混在一起
-const 确认   = 成立.filter((m) => m.kind !== '精简')
+const 确认   = 成立.filter((m) => m.kind === '缺陷')
+const 性能项 = 成立.filter((m) => m.kind === '性能')
 const 整理   = 成立.filter((m) => m.kind === '精简')
 // 按发现的性质分桶（cleanupType），不按它是哪个维度报的——死代码维度也会报「留着但该简化」的
 const 是删除 = (m) => (m.cleanupType ? /^删除/.test(m.cleanupType) : m.dim === 'dead-code')
@@ -624,7 +717,7 @@ const 候选known = [
   ...证伪.map((m) => `${m.title}（${m.file}）——上轮已核实不成立`),
 ]
 
-log(`找到 ${merged.length} 条（去重后 ${去重.length}）：缺陷确认 ${确认.length}；可删 ${可删.length}、可简化 ${可简化.length}（预计净减 ${总行数} 行）；需拍板 ${需拍板.length}；证伪 ${证伪.length}，存疑 ${存疑.length}，未判定 ${未判定.length}`)
+log(`找到 ${merged.length} 条（去重后 ${去重.length}）：缺陷确认 ${确认.length}；性能 ${性能项.length}；可删 ${可删.length}、可简化 ${可简化.length}（预计净减 ${总行数} 行）；需拍板 ${需拍板.length}；证伪 ${证伪.length}，存疑 ${存疑.length}，未判定 ${未判定.length}`)
 if (失败维度.length) log(`❌ 维度 ${失败维度.join(', ')} 的找手没有返回——这些维度**没审**，0 条不代表干净，需要重跑`)
 if (存疑.length) log(`⚠️ ${存疑.length} 条「读不出结论」——人工复核第一优先级（其中精简类多半是"无法排除动态引用/对外 API"，不是"不能删"）`)
 if (未判定.length) log(`⚠️ ${未判定.length} 条没拿到判定，去 journal.jsonl 核原始返回值，不要当成"没问题"`)
@@ -636,7 +729,12 @@ const 条目 = (m) => `- **[${等级(m)}${m.severityAdjusted && 归一(m.severit
   - 验证：${m.verifyReason}${m.correction ? `\n  - 修正：${m.correction}` : ''}
   - 最简修法：${m.fix}${m.alternatives ? `\n  - 其他改法与取舍：${m.alternatives}` : ''}${m.impact ? `\n  - 影响面：${m.impact}` : ''}${m.needsDecision ? `\n  - ⚠️ 需人拍板：${m.needsDecision}` : ''}`
 // 整理清单每条自带：为什么留着有害 / 影响面（验证员自己搜的结果）/ 怎么删怎么改 / 风险，用户看这一条就能决定删不删
-const 整理条目 = (m) => `- **${m.title}** — \`${m.file}:${m.line}\`${m.linesSaved ? `　预计净减 ${m.linesSaved} 行` : ''}（${m.dim}${m.alsoFoundBy ? `；另被 ${m.alsoFoundBy.join('、')} 报出` : ''}）
+const 性能条目 = (m) => `- **[${等级(m)}] ${m.title}** — \`${m.file}:${m.line}\`（${m.dim}${m.alsoFoundBy ? `；另被 ${m.alsoFoundBy.join('、')} 报出` : ''}）
+  - 代价：${m.failure}
+  - 验证员复算：${m.costChecked || '(未写)'}${m.correction ? `\n  - 修正：${m.correction}` : ''}
+  - 假设的规模：${m.scaleBasis || '(未写)'}
+  - 怎么做：${m.fix}（复杂度变化：${m.complexityDelta ?? '未估'} 行${typeof m.complexityDelta === 'number' && m.complexityDelta <= 0 ? '，优化同时也是简化' : ''}）${m.alternatives ? `\n  - 其他做法与取舍：${m.alternatives}` : ''}${m.needsDecision ? `\n  - ⚠️ 需人拍板：${m.needsDecision}` : ''}`
+const 整理条目 = (m) => `- **${m.title}** — \`${m.file}:${m.line}\`${m.linesSaved ? `　估算净减 ${m.linesSaved} 行（改完用 git diff --stat 实测）` : ''}（${m.dim}${m.alsoFoundBy ? `；另被 ${m.alsoFoundBy.join('、')} 报出` : ''}）
   - 留着的代价：${m.failure}
   - 影响面（验证员实查）：${m.impactChecked || '(未写)'}
   - 怎么做：${m.correction ? `${m.fix}\n  - 验证员补充：${m.correction}` : m.fix}${m.alternatives ? `\n  - 其他做法与取舍：${m.alternatives}` : ''}
@@ -650,17 +748,21 @@ const 报告 = [
   被截断 ? `> ⚠️ 被截断 ${被截断} 条，本轮没报全` : '',
   // 需要人拍板的单独拎到最前面，别埋在一大段里被「顺手一起同意」
   需拍板.length ? `\n## ⚠️ 需你拍板（${需拍板.length}）\n${需拍板.map((m) => `- **${m.title}** — \`${m.file}:${m.line}\`：${m.needsDecision}${m.alternatives ? `（可选做法：${m.alternatives}）` : ''}`).join('\n')}` : '',
-  `\n## 缺陷（${确认.length}）`,
-  ...分级.map((lv) => {
-    const xs = 确认.filter((m) => 等级(m) === lv)
-    return xs.length ? `\n### ${lv}\n${xs.map(条目).join('\n')}` : ''
-  }),
+  ...(确认.length || DIMS.some((d) => d.kind === '缺陷')
+    ? [`\n## 缺陷（${确认.length}）`, ...分级.map((lv) => {
+        const xs = 确认.filter((m) => 等级(m) === lv)
+        return xs.length ? `\n### ${lv}\n${xs.map(条目).join('\n')}` : ''
+      })]
+    : []),
+  ...(性能项.length || DIMS.some((d) => d.kind === '性能')
+    ? [`\n## 性能（${性能项.length}）`, `> 依据是代价估算（频率 × 单次 × 规模），已由验证员独立复算。**优化是否值得由你定**：要让代码更复杂的都标了「简洁 vs 性能」。`, ...性能项.map(性能条目)]
+    : []),
   `\n## 整理清单·可删除的代码（${可删.length}）`,
-  `> 影响面已由验证员独立搜索确认；按预计净减行数从多到少排。建议**单独成一次提交**，不与缺陷修复混在一起。`,
+  `> 影响面已由验证员独立搜索确认；按估算净减行数从多到少排。建议**单独成一次提交**，不与缺陷修复混在一起。`,
   ...可删.sort(按收益).map(整理条目),
   `\n## 整理清单·可简化的过度设计（${可简化.length}）`,
   ...可简化.sort(按收益).map(整理条目),
-  整理.length ? `\n> 整理清单合计预计净减约 ${总行数} 行。` : '',
+  整理.length ? `\n> 整理清单合计估算净减约 ${总行数} 行（模型估的，不是精确值）。` : '',
   `\n## 存疑·人工复核第一优先（${存疑.length}）`,
   ...存疑.map((m) => `- [${m.kind}] ${m.title} — \`${m.file}:${m.line}\`（${m.dim}${m.alsoFoundBy ? `；另被 ${m.alsoFoundBy.join('、')} 报出` : ''}）\n  - 卡在：${m.verifyReason}\n  - 声称的问题：${m.failure}\n  - 建议做法：${m.fix}${m.needsDecision ? `\n  - ⚠️ 需人拍板：${m.needsDecision}` : ''}`),
   `\n## 未判定·去 journal.jsonl 核（${未判定.length}）`,
@@ -675,6 +777,7 @@ return {
   确认,
   可删,
   可简化,
+  性能项,
   存疑: 存疑.map((r) => ({ dim: r.dim, kind: r.kind, title: r.title, file: r.file, line: r.line, 卡在哪: r.verifyReason, 声称的问题: r.failure, 建议做法: r.fix, 需拍板: r.needsDecision })),
   证伪: 证伪.map((r) => ({ dim: r.dim, kind: r.kind, title: r.title, file: r.file, line: r.line, 为何否掉: r.verifyReason })),
   未判定,

@@ -62,6 +62,14 @@ args: { paths: {app: "/tmp/eval-sample-app"}, project: "...", only: ["dead-code"
 
 任何一条不过，说明你刚改的 prompt/脚本让审查变钝了。
 
+**性能规模专测**（每档约 5 万 token，1 个 agent）：用 `skip` 掉全部默认维度、`extraDims: ["performance"]`，再用 `inject` 注入 `order_report` 的 N+1 发现，
+**只改 `project` 里「规模」那段**跑三次。期望见 `expected.json` 的 `performance_scale_test`。
+
+### 实测记录（0.6.0：性能类型 + 简化维度补状态层面）
+- 整理模式（4 个 agent，约 23 万 token）：新增的 `Batch.count` 派生状态、`OrderState` 互斥布尔都命中；`load_meta/load_tags` 诱饵没被误报；原有三个目标仍命中。小噪音：把「循环改推导式」报成了简化（已加「纯语法糖改写不算简化」）。
+- 性能规模专测：三档规模下验证员都自己复算了代价并按规模判（B / C / 不成立），`channel_fees`（固定 3 个渠道）三次都不成立。
+- 注意：**这些都是 n=1**，只能说明方向对；真实项目里的表现要靠下次真跑。
+
 ### 已有的实测记录（0.4.1）
 - 整理类完整跑（`mode: cleanup`，4 个 agent，约 20 万 token）：CLEAN-1/2/3 实质都命中，每条影响面非空；`on_refund`、`parse_model_reply` 找手没报（保守）。
 - 验证员专测（`inject`，1 个 agent，约 5 万 token）：`legacy_format` 成立；`on_refund`（动态调用）、`parse_model_reply`（剥 json）都被正确否掉，理由是验证员自己顺着 `admin_cli → dispatch → getattr` 查出来的。

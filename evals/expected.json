@@ -60,6 +60,20 @@
       "symbol": "total_cents",
       "bucket": "可简化",
       "why": "唯一调用方 admin_total 传入的永远是 db.orders.values()，None/isinstance 判断是为不可能场景写的"
+    },
+    {
+      "id": "CLEAN-4",
+      "file": "billing.py",
+      "symbol": "Batch",
+      "bucket": "可简化或可删",
+      "why": "count 恒等于 len(items)（派生状态），items 无人读（0.6.0 新增：状态层面）"
+    },
+    {
+      "id": "CLEAN-5",
+      "file": "billing.py",
+      "symbol": "OrderState/mark",
+      "bucket": "可简化或可删",
+      "why": "三个互斥布尔其实是一个枚举，且唯一调用恒传 paid（0.6.0 新增：状态层面）"
     }
   ],
   "must_not_confirm": [
@@ -80,6 +94,18 @@
       "file": "billing.py",
       "symbol": "parse_model_reply",
       "why": "剥掉 ```json 包裹是让常见情况成功，要留。验证员应判不成立"
+    },
+    {
+      "id": "DECOY-4",
+      "file": "billing.py",
+      "symbol": "load_meta/load_tags",
+      "why": "两个函数默认值不同（{} vs []），合并要加参数，不算简化；0.6.0 起属于误报防线"
+    },
+    {
+      "id": "DECOY-5",
+      "file": "billing.py",
+      "symbol": "channel_fees",
+      "why": "逐渠道查库，但渠道数固定为 3，性能上不可感知，应判不成立"
     }
   ],
   "诱饵测试怎么算通过": "诱饵必须**被找手报出来、再被验证员正确否掉或标读不出结论**才算验证员过关。找手根本没报，只说明找手保守，验证员没被考到——第一次评测就是这样。",
@@ -107,5 +133,26 @@
         "why": "找手的替换写法对缺 cents 抛 KeyError、对 None 抛 TypeError，行为不等价；但简化方向是对的。0.5.0 起验证员判据：方向对且有等价写法→成立+补等价写法；取决于读不到的数据→读不出结论；能指出具体反例且无等价简化→不成立"
       }
     ]
+  },
+  "performance_scale_test": {
+    "说明": "用 args.inject + extraDims:['performance'] + skip 掉全部默认维度，把同一条 order_report N+1 发现放在三种 project 规模下交给验证员（各 1 个 agent，约 5 万 token）。验证员应按规模判，而不是一律放行/一律否掉。",
+    "order_report": [
+      {
+        "project 规模": "累计约 2 亿订单、每分钟调用一次",
+        "期望": "成立，B 级",
+        "实测(0.6.0)": "成立，B-重要：复算 2e8×5ms≈11.6 天 ≫ 60s 间隔"
+      },
+      {
+        "project 规模": "累计约 2 万订单、偶尔手动跑",
+        "期望": "成立（可感知，约 100s），严重度较低",
+        "实测(0.6.0)": "成立，C-建议：复算 100s，非热路径所以降级。注意：第一次测试把这档当成『应不成立』是测试设计错了，遍历全部历史订单时 2 万条已可感知"
+      },
+      {
+        "project 规模": "累计不到 100 订单、偶尔手动跑",
+        "期望": "不成立（不可感知，且批量查询比现有 4 行循环更复杂）",
+        "实测(0.6.0)": "不成立"
+      }
+    ],
+    "channel_fees": "三档规模下都应不成立（渠道数固定为 3）。实测：三次均不成立。"
   }
 }

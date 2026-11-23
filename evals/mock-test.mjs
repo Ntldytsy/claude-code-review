@@ -210,8 +210,64 @@ await mustThrow('extraKnown（已移除）', { extraKnown: ['x'] })
   const { r } = await run({ ...base, only: ['dead-code'], inject: { 'dead-code': items } }, () => ({
     verdicts: verdicts.map((v, i) => v === 'SKIP' ? null : ({ index: i + 1, verdict: v, reason: 'x', impactChecked: i === 6 ? '' : 'rg → x' })).filter(Boolean),
   }))
-  const 总 = r.确认.length + r.可删.length + r.可简化.length + r.证伪.length + r.存疑.length + r.未判定.length
-  check('桶总和 = 发现总数（7）', 总 === items.length, `确认=${r.确认.length} 可删=${r.可删.length} 可简化=${r.可简化.length} 证伪=${r.证伪.length} 存疑=${r.存疑.length} 未判定=${r.未判定.length}`)
+  const 总 = r.确认.length + r.性能项.length + r.可删.length + r.可简化.length + r.证伪.length + r.存疑.length + r.未判定.length
+  check('桶总和 = 发现总数（7）', 总 === items.length, `确认=${r.确认.length} 性能=${r.性能项.length} 可删=${r.可删.length} 可简化=${r.可简化.length} 证伪=${r.证伪.length} 存疑=${r.存疑.length} 未判定=${r.未判定.length}`)
+}
+
+// ── 0.6.0：性能独立成类型；简化维度补状态层面模式与误报防线 ──────────────────────
+const perf = (extra) => ({ kind: '性能', title: '列表接口逐项查库', file: 'p.py', line: 9, evidence: 'e', failure: '每次 N 次查询', fix: '批量取', severity: 'C-建议', costEstimate: '每次打开×40项目×3次查询≈120次', scaleBasis: 'project 描述：5 人团队', complexityDelta: -3, ...extra })
+// 27. 性能类：带 costChecked 的成立 → 「性能」章；没带 → 降级存疑；不成立 → 证伪
+{
+  const { r } = await run({ ...base, dims: undefined, only: ['backend-bugs'], extraDims: ['performance'], inject: { performance: [perf()] } }, (p) => verdictN(p, { costChecked: '40×3=120次主键查询，本机<1ms，≈100ms 量级，非热路径' }))
+  check('性能类成立 → 进「性能」章', r.性能项.length === 1 && r.报告.includes('## 性能（1）') && r.报告.includes('验证员复算'), `性能项=${r.性能项.length}`)
+  const { r: r2 } = await run({ ...base, only: ['backend-bugs'], extraDims: ['performance'], inject: { performance: [perf()] } }, (p) => verdictN(p, { costChecked: '' }))
+  check('性能类缺 costChecked → 降级存疑', r2.性能项.length === 0 && r2.存疑.length === 1, `性能项=${r2.性能项.length} 存疑=${r2.存疑.length}`)
+  const { r: r3 } = await run({ ...base, only: ['backend-bugs'], extraDims: ['performance'], inject: { performance: [perf()] } }, (p) => verdictN(p, { verdict: '不成立', costChecked: '不可感知' }))
+  check('性能类不成立 → 证伪', r3.证伪.length === 1 && r3.性能项.length === 0)
+}
+// 28. 性能维度的找手/验证员 prompt 用的是性能判据；缺陷维度不再带性能提示
+{
+  let perfFind = '', bugFind = '', perfVerify = '', bugVerify = ''
+  await run({ ...base, only: ['backend-bugs'], extraDims: ['performance'] }, (p, o) => {
+    if (o.label === 'find:performance') perfFind = p
+    if (o.label === 'find:backend-bugs') bugFind = p
+    if (o.label.startsWith('find:')) return { suppressed: 0, findings: [{ ...(o.label === 'find:performance' ? perf() : bug()) }] }
+    if (o.label === 'verify:performance') perfVerify = p
+    if (o.label === 'verify:backend-bugs') bugVerify = p
+    return verdictN(p, { costChecked: 'x' })
+  })
+  check('性能找手 prompt 含「代价估算」要求', perfFind.includes('costEstimate 必填') && perfFind.includes('不可感知'))
+  check('性能验证员 prompt 含性能判据，缺陷验证员不含', perfVerify.includes('【kind=性能 的判法】') && !bugVerify.includes('【kind=性能 的判法】'))
+  check('后端缺陷维度不再带「性能」提示（避免被判不成立）', !bugFind.includes('N+1：') && bugFind.includes('performance'))
+}
+// 29. 简化维度补了状态层面模式与误报防线；验证员精简判据含误报防线
+{
+  let simp = '', ver = ''
+  await run({ ...base, only: ['simplify'] }, (p, o) => {
+    if (o.label.startsWith('find:')) { simp = p; return { suppressed: 0, findings: [clean()] } }
+    ver = p; return verdictN(p, {})
+  })
+  for (const k of ['先找现成的', '派生状态被存成独立状态', '互斥的布尔/ref 其实是一个枚举', '净减 ≤0 行', '兼容老数据', '项目惯例优先于通用规则', '性能不是写法']) {
+    check(`simplify prompt 含「${k}」`, simp.includes(k))
+  }
+  check('验证员精简判据含误报防线', ver.includes('净减行数你自己估一遍') && ver.includes('看着重复但其实不同') && ver.includes('项目惯例优先'))
+}
+// 30. dims 的 kind 允许「性能」
+{
+  let threw = false
+  try { await run({ ...base, dims: [{ key: 'x', role: 'r', focus: 'f', kind: '性能' }] }, () => ({ suppressed: 0, findings: [] })) } catch { threw = true }
+  check('自定义 dims 允许 kind=性能', !threw)
+}
+
+// 31. 没跑的维度不显示空章节：只跑整理类时没有「缺陷」「性能」章；没开性能维度时没有「性能」章
+{
+  const none = () => ({ suppressed: 0, findings: [] })
+  const { r: a } = await run({ ...base, mode: 'cleanup' }, none)
+  check('整理模式不出现「缺陷」「性能」空章节', !a.报告.includes('## 缺陷') && !a.报告.includes('## 性能'), a.报告.split('\n').filter((l) => l.startsWith('## ')).join('|'))
+  const { r: b } = await run({ ...base, only: ['backend-bugs'] }, none)
+  check('没开性能维度不出现「性能」章，缺陷章仍在', !b.报告.includes('## 性能') && b.报告.includes('## 缺陷'))
+  const { r: c } = await run({ ...base, only: ['backend-bugs'], extraDims: ['performance'] }, none)
+  check('开了性能维度即使 0 条也显示「性能（0）」（证明审过了）', c.报告.includes('## 性能（0）'))
 }
 
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过')

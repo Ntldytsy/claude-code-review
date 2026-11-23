@@ -10,6 +10,8 @@
 | Vue 2（vue-cli 4 / webpack 4） | `stack-vue2.md` | 无实测记载，视为全部未运行 |
 | Python | `stack-python.md` | 命令均已本机实测（Python 3.12 + pyflakes）；框架相关未覆盖 |
 
+⚠️ 栈文件里的「审查维度重点清单」用来替换 `workflow.js` 里对应维度的 `focus`。**性能类条目（如 N+1）请放进 `performance` 维度的 focus，别放进 `backend-bugs`**——那里没有失败场景，会被判不成立。
+
 每个栈文件的结构一致：四类动作命令映射 → 本栈审查维度重点清单（可替换 workflow.js 中 DIMS 的 focus）→ 本栈特有的坑。
 
 **置信度标签**：`confident` 可放心用 · `version-dependent` 依赖版本/配置，先在项目里确认一次 · `uncertain` 仅供参考。没实际运行过工具的栈，标签一律降为 `version-dependent`。
