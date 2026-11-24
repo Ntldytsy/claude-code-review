@@ -39,6 +39,9 @@ const PROJECT_BODY = P.project || `
 # 团队的明确标准
 【按项目填:引用你自己说过的原话，例如"只要满足要求的最简单方案""过度设计本身就是缺陷"】
 
+# 入口与信任边界（缺陷评级要用）
+【按项目填:接口只给自家前端用还是对外公开？内部工具还是面向公网用户？有无鉴权网关？不写则按保守处理:只有页面上走得到的问题才不降级，绕过页面才能触发的非安全类也只降到 C，安全类一律不降】
+
 # 规模（性能判断要用）
 【按项目填:用户数 / 数据量 / 并发峰值 / 是否单机；不知道就写"未知"。性能维度会据此估算代价，没写只能从配置里推断】
 `
@@ -105,7 +108,12 @@ const OUT_BUG = `# 输出要求（缺陷类）
 注意：**缩进/引号/命名/内部结构的差异 = 纯风格，不报**；但**同一个操作在不同页面
 呈现给用户的样子不一致（按钮主次或颜色、文案、位置、交互、报错提示）不是风格问题**，
 它是用户能看见的缺陷，该报。
-所有发现 kind 填「缺陷」。`
+所有发现 kind 填「缺陷」。
+- **trigger / reach 必填**：先回答「正常用户只靠页面操作，能不能走到这里」。去读前端入口：按钮有没有被禁用、输入有没有被限制、
+  有没有二次确认、这个接口到底有没有页面在调。绕过页面才能触发的，reach 填「非常规渠道」，别因为「理论上能调接口」就按正常操作报。
+- **fix 优先改关入口的那一层**：前端一处就能关住的，别开出一套后端改法；后端改动复杂而前端能挡住时，前端方案作首选，
+  后端加固放 alternatives 并说明「是否值得做由你定」。**例外**：越权/鉴权/注入/资金/不可逆副作用类，后端校验必须保留，不能用前端限制替代。
+- impact 写清照 fix 改会动到谁（调用方、签名、数据格式），别只写问题本身。`
 
 const OUT_CLEAN = `# 输出要求（精简类：死代码 / 冗余 / 过度设计）
 本轮的目的是**让代码更简洁、更好维护**。AI 写的代码常见：多余的方法、没必要的抽象、过度防御、
@@ -160,9 +168,11 @@ const findingsSchema = (cap) => ({
           line:     { type: 'integer' },
           evidence: { type: 'string', description: '贴出关键代码，说明为什么是问题' },
           failure:  { type: 'string', description: '缺陷：具体失败场景（什么输入/时序 → 什么错误结果）。精简：留着它的代价（读者负担/维护风险/误导/重复漂移）' },
-          fix:      { type: 'string', description: '缺陷：最简修法，只写必要那几行，匹配周围风格。精简：可直接照做的删除/简化步骤，含连带孤儿' },
+          fix:      { type: 'string', description: '缺陷：最简修法，只写必要那几行，匹配周围风格；**优先改能一次关住入口的那一层**（前端禁用/限制输入/二次确认往往一处就够，后端不必再动）。精简：可直接照做的删除/简化步骤，含连带孤儿' },
+          trigger:       { type: 'string', description: '缺陷必填：触发路径——用户在哪个页面做什么操作（或什么外部输入）会走到这里；走不到就写「只能绕过页面直接调接口/构造请求」' },
+          reach:         { type: 'string', enum: ['正常操作', '少见组合', '非常规渠道', '外部输入'], description: '缺陷必填：正常操作=页面上正常点就会碰到（含连点、刷新、多标签、网络失败）；少见组合=要很少见的操作顺序/时序；非常规渠道=只有绕过页面（直接调接口、构造请求、改 DOM、脚本）才能触发；外部输入=上传文件/第三方回调/大模型输出等不受你页面控制的入口' },
           alternatives:  { type: 'string', description: '若存在不止一种合理改法，并列写出其他改法与取舍；只有一种就留空。不要静默替用户选' },
-          impact:        { type: 'string', description: '缺陷：动到别人依赖的什么+消费方。**精简：必填**，写「搜了什么 → 命中什么」，含动态引用检查结果' },
+          impact:        { type: 'string', description: '缺陷：照 fix 改动会影响哪些调用方/依赖（函数签名、返回值、数据格式、别处的假设），写「搜了什么 → 命中什么」。**精简：必填**，写「搜了什么 → 命中什么」，含动态引用检查结果' },
           needsDecision: { type: 'string', description: '真需要人拍板的原因（改表/产品语义/成本策略/抽公共模块/为性能牺牲简洁/**有迹象表明是对外 API**）；不需要就留空。别因为"理论上可能被外部调用"就填' },
           cleanupType:   { type: 'string', enum: ['删除', '简化'], description: '精简类：整段删掉=删除；留着但换更简单的写法=简化（决定报告里归到「可删除」还是「可简化」）' },
           linesSaved:    { type: 'integer', description: '精简类：估算的净减少行数（模型估的，改完要用 git diff --stat 实测，别当精确值）' },
@@ -202,6 +212,10 @@ const VERDICT = {
           severityAdjusted: { type: 'string', enum: ['A-阻断', 'B-重要', 'C-建议'], description: '只有你认为找手的严重度不对时才填；只能是这三个值之一（不要写「C」「低」「降为C级」这类自由文本）' },
           correctedLine:    { type: 'integer', description: '若找手报的行号有偏差，这里写真实的起始行号（报告会采用它）；没偏差就省略' },
           // 精简类的验证员必须自己搜一遍并写在这里；空的话汇总时会把「成立」降级成「读不出结论」
+          reach:            { type: 'string', enum: ['正常操作', '少见组合', '非常规渠道', '外部输入'], description: '缺陷必填：你复核后的可达性档位（定义同找手）。不采信找手的说法，自己读前端入口/调用链判断' },
+          reachChecked:     { type: 'string', description: '缺陷必填：你怎么判的——页面上哪一步能走到；若走不到，前端哪一处挡住了入口（文件:行）；接口是否对外公开' },
+          securityImpact:   { type: 'boolean', description: '缺陷必填：该问题是否涉及越权/注入/资金金额/不可逆副作用/鉴权，且 project 没有声明调用方可信。true 则不因「页面上点不出来」降级' },
+          fixImpactChecked: { type: 'string', description: '缺陷必填：照 fix 改动会影响的调用方——你自己搜的命令、命中结果、改了会不会破坏别处；并判断 fix 是不是「关入口成本最低的那一层」，不是的话在 correction 里给出更小的改法' },
           impactChecked:    { type: 'string', description: '精简类必填：你自己做的消费方搜索——命令、命中结果、动态引用检查结论' },
           costChecked:      { type: 'string', description: '性能类必填：你自己复算的代价——频率 × 单次 × 规模 = 结果 → 体感；规模若是推断要说明' },
         },
@@ -480,7 +494,13 @@ const 判据缺陷 = `【kind=缺陷 的判法】
   ⚠️ 但**跨文件的"用户可见不一致"不算纯风格**：同一个操作在两个页面按钮颜色/主次不同、
   文案不同、交互不同——用户会以为是两个不同功能。说得清"用户会怎么被误导"就是**成立**。
   只有缩进/引号/变量命名/内部结构这种用户看不见的差异才算风格。
-- 描述有小错但问题实际成立 → **成立**，并在 correction 里写出准确描述；行号有偏差就填 **correctedLine**`
+- 描述有小错但问题实际成立 → **成立**，并在 correction 里写出准确描述；行号有偏差就填 **correctedLine**
+- **可达性复核（缺陷必做）**：自己读前端入口和调用链，判断正常用户仅靠页面操作能不能触发，填 **reach / reachChecked**，不采信找手。
+  评级上限由脚本按你填的 reach 执行：少见组合≤B，非常规渠道≤C（securityImpact=true 的除外）。
+  **securityImpact**：越权、鉴权、注入、资金金额、不可逆副作用这几类填 true——前端限制不是安全控制，不因「页面上点不出来」降级；
+  但 project 的「入口与信任边界」若明确写了调用方可信（内部工具、自家前端独占接口），则填 false。project 没写就按 true 保守处理。
+- **fix 复核（缺陷必做）**：自己搜 fix 要改的符号的调用方，写进 **fixImpactChecked**，并判断它是不是关入口成本最低的那一层。
+  前端一处就能关住而 fix 却改了后端一堆 → 在 correction 里给出更小的改法（成立与否不变）。安全类除外，后端校验必须保留。`
 
 const 判据精简 = `【kind=精简 的判法】（死代码/冗余/过度设计：没有失败场景是正常的，**不要**拿"推演不出失败场景"当不成立的理由，
 也不要因为"它不会出错/只是风格"就否掉——整理代码、提高可维护性正是本轮目的）
@@ -609,8 +629,15 @@ const 归一 = (v) => {
   if (/重要|中/.test(t)) return 'B-重要'
   return null
 }
-const 等级 = (m) => m.levelOverride || 归一(m.severityAdjusted) || 归一(m.severity) || '未分级'
 const 分级 = ['A-阻断', 'B-重要', 'C-建议', '未分级']
+// 可达性封顶：页面上很难触发的问题评级靠后。只对验证员明确判 securityImpact=false 的缺陷生效；安全类/没写的不封顶（保守）
+const 原等级 = (m) => m.levelOverride || 归一(m.severityAdjusted) || 归一(m.severity) || '未分级'
+const 封顶 = (lv, m) => {
+  if (m.kind !== '缺陷' || m.securityImpact !== false) return lv
+  const 上限 = { '少见组合': 'B-重要', '非常规渠道': 'C-建议' }[m.reach]
+  return 上限 && 分级.indexOf(lv) < 分级.indexOf(上限) ? 上限 : lv
+}
+const 等级 = (m) => 封顶(原等级(m), m)
 const 更严 = (x, y) => 分级.indexOf(x) <= 分级.indexOf(y) ? x : y   // 未分级排最后，所以有等级的永远比未分级「更严」
 
 // 路径规范化：找手有时写绝对路径、有时写相对路径（真实运行里同一轮就是 29 条绝对 / 11 条相对），
@@ -651,6 +678,11 @@ for (const r of rs) {
       verdict = '读不出结论'
       reason = `验证员判了成立但没写 impactChecked（没有自己做影响面搜索），不能直接当"可以删"。${reason}`
     }
+    // 缺陷类的「成立」必须带可达性复核和 fix 影响面复核，没写等于没查
+    if (f.kind === '缺陷' && verdict === '成立' && !(v.reach && (v.reachChecked || '').trim() && (v.fixImpactChecked || '').trim())) {
+      verdict = '读不出结论'
+      reason = `验证员判了成立但没写全 reach / reachChecked / fixImpactChecked（没有复核可达性或 fix 影响面），不能直接进缺陷清单。${reason}`
+    }
     // 性能类的「成立」同理：必须带验证员自己复算的代价，没写等于没复算，降级
     if (f.kind === '性能' && verdict === '成立' && !(v.costChecked || '').trim()) {
       verdict = '读不出结论'
@@ -664,6 +696,7 @@ for (const r of rs) {
       correction: v && v.correction,
       severityAdjusted: v && v.severityAdjusted,
       impactChecked: v && v.impactChecked,
+      reach: v && v.reach, reachChecked: v && v.reachChecked, securityImpact: v && v.securityImpact, fixImpactChecked: v && v.fixImpactChecked,
       costChecked: v && v.costChecked,
     })
   })
@@ -726,8 +759,9 @@ if (被截断) log(`⚠️ 另有 ${被截断} 条因每维度上限没报上来
 // 现成的 markdown 报告：脚本里没有写文件的能力，由调用方（SKILL.md 步骤 3）把它落盘，再据此出修改方案
 const 条目 = (m) => `- **[${等级(m)}${m.severityAdjusted && 归一(m.severityAdjusted) !== 归一(m.severity) ? `，验证员由 ${m.severity} 调整` : ''}] ${m.title}** — \`${m.file}:${m.line}\`（${m.dim}${m.alsoFoundBy ? `；另被 ${m.alsoFoundBy.join('、')} 报出` : ''}）
   - 失败场景：${m.failure}
+  - 触发路径：${m.reach ? `[${m.reach}] ` : ''}${m.reachChecked || m.trigger || '(未写)'}${等级(m) !== 原等级(m) ? `（页面上难触发，评级已由 ${原等级(m)} 按可达性下调）` : ''}
   - 验证：${m.verifyReason}${m.correction ? `\n  - 修正：${m.correction}` : ''}
-  - 最简修法：${m.fix}${m.alternatives ? `\n  - 其他改法与取舍：${m.alternatives}` : ''}${m.impact ? `\n  - 影响面：${m.impact}` : ''}${m.needsDecision ? `\n  - ⚠️ 需人拍板：${m.needsDecision}` : ''}`
+  - 最简修法：${m.fix}${m.alternatives ? `\n  - 其他改法与取舍：${m.alternatives}` : ''}${m.impact ? `\n  - 改动影响面（找手）：${m.impact}` : ''}${m.fixImpactChecked ? `\n  - 改动影响面（验证员实查）：${m.fixImpactChecked}` : ''}${m.needsDecision ? `\n  - ⚠️ 需人拍板：${m.needsDecision}` : ''}`
 // 整理清单每条自带：为什么留着有害 / 影响面（验证员自己搜的结果）/ 怎么删怎么改 / 风险，用户看这一条就能决定删不删
 const 性能条目 = (m) => `- **[${等级(m)}] ${m.title}** — \`${m.file}:${m.line}\`（${m.dim}${m.alsoFoundBy ? `；另被 ${m.alsoFoundBy.join('、')} 报出` : ''}）
   - 代价：${m.failure}

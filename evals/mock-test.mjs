@@ -19,7 +19,7 @@ async function run(args, agentImpl) {
 const base = { paths: { a: '/a', b: '/b' }, project: 'p' }
 const bug = (extra) => ({ kind: '缺陷', title: '起点大于终点', file: 'a.py', line: 3, evidence: 'e', failure: 'f', fix: 'x', severity: 'B-重要', ...extra })
 const clean = (extra) => ({ kind: '精简', cleanupType: '删除', title: '死函数', file: 'b.py', line: 1, evidence: 'e', failure: 'f', fix: 'x', severity: 'C-建议', linesSaved: 3, ...extra })
-const verdictN = (prompt, f) => ({ verdicts: Array.from({ length: (prompt.match(/【\d+】/g) || []).length }, (_, i) => ({ index: i + 1, verdict: '成立', reason: 'ok', impactChecked: 'rg → x', ...f })) })
+const verdictN = (prompt, f) => ({ verdicts: Array.from({ length: (prompt.match(/【\d+】/g) || []).length }, (_, i) => ({ index: i + 1, verdict: '成立', reason: 'ok', impactChecked: 'rg → x', reach: '正常操作', reachChecked: '页面按钮可点', securityImpact: true, fixImpactChecked: 'rg → 仅此处调用', ...f })) })
 const mustThrow = async (name, a) => {
   let threw = false
   try { await run({ ...base, ...a }, () => null) } catch { threw = true }
@@ -35,6 +35,30 @@ for (const v of ['C-建议', 'C', 'C级（降级）', '低', '降为C', '随便�
   const { r } = await run({ ...base, only: ['backend-bugs'] }, (p, o) => o.label.startsWith('find:') ? { suppressed: 0, findings: [bug()] } : verdictN(p, { severityAdjusted: v }))
   const body = section(r.报告, '## 缺陷', '## 整理清单')
   check(`严重度写成「${v}」仍在缺陷章节`, body.includes('起点大于终点'), body.slice(0, 80))
+}
+// 1b. 可达性（0.7.0）：页面上难触发的缺陷评级靠后；安全类不降；缺复核就降级
+{
+  const go = (f, bugExtra = {}) => run({ ...base, only: ['backend-bugs'] }, (p, o) => o.label.startsWith('find:') ? { suppressed: 0, findings: [bug({ severity: 'A-阻断', ...bugExtra })] } : verdictN(p, f))
+  let { r } = await go({ reach: '非常规渠道', securityImpact: false })
+  check('非常规渠道且非安全类 → 封顶 C', section(r.报告, '### C-建议', '## ').includes('起点大于终点') && r.报告.includes('评级已由 A-阻断 按可达性下调'), r.报告.slice(0, 300))
+  ;({ r } = await go({ reach: '少见组合', securityImpact: false }))
+  check('少见组合 → 封顶 B', section(r.报告, '### B-重要', '### C-建议').includes('起点大于终点'))
+  ;({ r } = await go({ reach: '非常规渠道', securityImpact: true }))
+  check('安全类（securityImpact=true）不因非常规渠道降级', section(r.报告, '### A-阻断', '### B-重要').includes('起点大于终点'))
+  ;({ r } = await go({ reach: '非常规渠道' , securityImpact: undefined }))
+  check('没填 securityImpact 按保守处理，不降级', section(r.报告, '### A-阻断', '### B-重要').includes('起点大于终点'))
+  ;({ r } = await go({ reach: '外部输入', securityImpact: false }))
+  check('外部输入不封顶', section(r.报告, '### A-阻断', '### B-重要').includes('起点大于终点'))
+  for (const miss of ['reach', 'reachChecked', 'fixImpactChecked']) {
+    ;({ r } = await go({ [miss]: '' }))
+    check(`缺陷成立但缺 ${miss} → 降为读不出结论`, r.确认.length === 0 && r.存疑.length === 1, `确认=${r.确认.length} 存疑=${r.存疑.length}`)
+  }
+  ;({ r } = await go({ fixImpactChecked: 'rg foo → 3 处调用' }))
+  check('报告带触发路径和验证员实查的改动影响面', r.报告.includes('触发路径：[正常操作] 页面按钮可点') && r.报告.includes('改动影响面（验证员实查）：rg foo'))
+  let seen = ''
+  await run({ ...base, only: ['backend-bugs'] }, (p, o) => { if (o.label.startsWith('find:')) { seen += p; return { suppressed: 0, findings: [] } } return null })
+  check('找手 prompt 含触发路径与「优先改关入口那层」', seen.includes('trigger / reach 必填') && seen.includes('优先改关入口的那一层'))
+  check('project 模板含「入口与信任边界」', SRC.includes('# 入口与信任边界'))
 }
 // 2. 找手没返回 ≠ 该维度干净
 {
@@ -83,7 +107,7 @@ for (const order of [['backend-bugs', 'security'], ['security', 'backend-bugs']]
   const { r } = await run({ ...base, dims: undefined, only: ['backend-bugs'], extraDims: ['security'] }, (p, o) => {
     if (o.label.startsWith('find:')) return { suppressed: 0, findings: [bug({ title: `T-${o.label}` })] }
     const want = o.label === `verify:${order[0]}` ? '不成立' : '成立'
-    return { verdicts: [{ index: 1, verdict: want, reason: 'x' }] }
+    return { verdicts: [{ index: 1, verdict: want, reason: 'x', reach: '正常操作', reachChecked: 'r', fixImpactChecked: 'f' }] }
   })
   check(`去重：${order[0]} 先判不成立、${order[1]} 判成立 → 成立的留在缺陷里`, r.确认.length === 1 && r.证伪.length === 0, `确认=${r.确认.length} 证伪=${r.证伪.length}`)
 }
