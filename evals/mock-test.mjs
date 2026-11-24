@@ -60,6 +60,19 @@ for (const v of ['C-建议', 'C', 'C级（降级）', '低', '降为C', '随便�
   check('找手 prompt 含触发路径与「优先改关入口那层」', seen.includes('trigger / reach 必填') && seen.includes('优先改关入口的那一层'))
   check('project 模板含「入口与信任边界」', SRC.includes('# 入口与信任边界'))
 }
+// 1c. 0.7.1：精简 prompt 的新判据 + skipped 栏
+{
+  let find = '', ver = ''
+  const { r } = await run({ ...base, only: ['simplify'] }, (p, o) => {
+    if (o.label.startsWith('find:')) { find += p; return { suppressed: 0, findings: [clean({ cleanupType: '简化' })], skipped: ['两处 FileReader 不合并：净行数相同', '  ', 7] } }
+    ver += p; return verdictN(p, {})
+  })
+  check('找手 prompt：行数口径=删−增、改动成本、skipped、busy 典型写法', find.includes('删掉的行 − 新增的行') && find.includes('改动成本要算进去') && find.includes('skipped（选填') && find.includes('prev/back/old/backup') && find.includes('.finally'))
+  check('验证员 prompt：替换写法边界清单、复用现成要核实', ver.includes('fullmatch') && ver.includes('逐条核边界') && ver.includes('复用现成的 X'))
+  check('skipped 进报告「有意没报」章（非字符串/空串被滤掉）', r.报告.includes('审查员有意没报的（1') && r.报告.includes('两处 FileReader 不合并'), r.报告.slice(-300))
+  const { r: r2 } = await run({ ...base, only: ['simplify'] }, (p, o) => o.label.startsWith('find:') ? { suppressed: 0, findings: [clean()] } : verdictN(p, {}))
+  check('没有 skipped 时不出现该章', !r2.报告.includes('有意没报'))
+}
 // 2. 找手没返回 ≠ 该维度干净
 {
   const { r } = await run({ ...base, only: ['backend-bugs'] }, (p, o) => o.label.startsWith('find:') ? null : verdictN(p, {}))

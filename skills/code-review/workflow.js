@@ -125,7 +125,10 @@ const OUT_CLEAN = `# 输出要求（精简类：死代码 / 冗余 / 过度设�
 - fix 写成**可直接照做的步骤**：删哪几行/哪个文件，连带会变成孤儿的 import/变量/函数也一并列出；
   简化类要写出简化后的样子（伪代码或具体改法），并说明**行为为什么等价**
 - cleanupType：整段删掉填「删除」，留着但改更简单的写法填「简化」（别因为是死代码维度就一律填删除）
-- linesSaved 给预计净减少的行数；risk 写风险（低/中/高 + 原因）
+- linesSaved 给预计净减少的行数，**口径 = 删掉的行 − 新增的行**（改写的行算一删一增，别随口报数）；fix 里写明「删 N 增 M」。risk 写风险（低/中/高 + 原因）
+- **改动成本要算进去**：净减不到 3 行、却要改测试断言 / 对外文案 / 日志 / 接口形状 / 行为的，不报；
+  被单测**直接调用**的小函数别内联；返回字段被测试固定成接口形状的别去掉。非要报的，在 risk 里列出要同步改的测试和文案
+- **找到的超过上限时**，保留「净减行数大且风险低」的，别按发现顺序截；多出来的条数写进 suppressed
 - **净减 0 行的纯命名/微小可读性问题不报**（如把未使用的循环变量改成下划线）
 - 拿不准能不能删（有动态引用、对外 API、跨仓库）也要报，在 risk 里写明——由验证员和用户决定
 - **needsDecision 别滥用**：「是否对外 API」只有**有迹象**才写——库/包的入口、\`__all__\`、文档或 README 里提到、
@@ -134,7 +137,8 @@ const OUT_CLEAN = `# 输出要求（精简类：死代码 / 冗余 / 过度设�
 - **为「让常见情况成功」而写的处理要留，不报**（如解析模型输出前剥掉 \`\`\`json 包裹）；只有「防不可能发生的情形 / 已被外层兜住」才算冗余
 - **先找现成的**：对要新增/保留的东西，先看项目里有没有现成的能直接用；写进 fix 时优先「复用现成」
 - **净减 ≤0 行且没有可读性收益的合并/抽取不报**；看着重复但默认值/写回格式/可信度/语义不同的不合并；为兼容老数据/老命令保留的逐字行为不动；文件头写明有意设计的不报
-- 不报纯命名/缩进/引号偏好；不报上面已列出的`
+- 不报纯命名/缩进/引号偏好；不报上面已列出的
+- **skipped（选填，最多 5 条）**：你**看着像可简化、但判断后有意没报**的，一句话写「是什么 + 为什么没报」（如「两处 FileReader→base64：合成公共函数净行数相同还要新增文件」）。让用户看得到你的判断并能否决；没有就留空`
 
 const OUT_PERF = `# 输出要求（性能类）
 性能问题**没有失败场景，也不是写法问题**——它的依据是「代价估算」。只报**在本项目实际规模下可感知**的：
@@ -155,6 +159,7 @@ const findingsSchema = (cap) => ({
   properties: {
     // 上限是硬的。超了必须在 suppressed 里报数，否则被砍掉的条目无声消失
     suppressed: { type: 'integer', description: `你实际找到、但因 ${cap} 条上限没报上来的条数。没有就填 0` },
+    skipped: { type: 'array', maxItems: 5, items: { type: 'string' }, description: '精简类选填：看着像可简化、但判断后有意没报的（是什么 + 为什么没报），最多 5 条；没有就省略' },
     findings: {
       type: 'array',
       maxItems: cap,
@@ -175,7 +180,7 @@ const findingsSchema = (cap) => ({
           impact:        { type: 'string', description: '缺陷：照 fix 改动会影响哪些调用方/依赖（函数签名、返回值、数据格式、别处的假设），写「搜了什么 → 命中什么」。**精简：必填**，写「搜了什么 → 命中什么」，含动态引用检查结果' },
           needsDecision: { type: 'string', description: '真需要人拍板的原因（改表/产品语义/成本策略/抽公共模块/为性能牺牲简洁/**有迹象表明是对外 API**）；不需要就留空。别因为"理论上可能被外部调用"就填' },
           cleanupType:   { type: 'string', enum: ['删除', '简化'], description: '精简类：整段删掉=删除；留着但换更简单的写法=简化（决定报告里归到「可删除」还是「可简化」）' },
-          linesSaved:    { type: 'integer', description: '精简类：估算的净减少行数（模型估的，改完要用 git diff --stat 实测，别当精确值）' },
+          linesSaved:    { type: 'integer', description: '精简类：估算的净减少行数 = 删掉的行 − 新增的行，改写的行算一删一增（模型估的，改完要用 git diff --stat 实测，别当精确值）' },
           costEstimate:  { type: 'string', description: '性能类必填：代价估算 = 触发频率 × 单次代价 × 数据/用户规模，写出每个数的来源（代码里读到的上限、配置、project 描述里的规模）。算不出就写算不出的原因' },
           scaleBasis:    { type: 'string', description: '性能类必填：你假设的项目规模从哪来（project 描述里写了 / 配置或部署文件里读到 / 推断）。推断的要明说是推断' },
           complexityDelta: { type: 'integer', description: '性能类：修法让代码净增（正）或净减（负）多少行；负数说明优化同时也是简化' },
@@ -289,7 +294,8 @@ const DEFAULT_DIMS = [
 - 派生状态被存成独立状态：值恒等于另一个值/表达式（如 \`n\` 恒等于 \`list.length\`、\`ready\` 恒等于 \`init != null\`）——改成现算
 - 几个互斥的布尔/ref 其实是一个枚举（如 adjusting/activeSub/activeCustom/activeMask 四个只能一个为真）
 - 把 props/入参拷成一堆本地变量，再逐个同步、逐个拼回去；同类数据用一个对象就够
-- 为了「恢复原状」再存一份旧状态——换一种不需要恢复的做法
+- 为了「恢复原状」再存一份旧状态——换一种不需要恢复的做法。**典型写法**：为让界面立刻有反馈，提前把业务状态改成「进行中」（如把 status 提前设成 running），
+  再用 prev/back/old/backup 变量存旧值，取消或失败时改回去。更简单的是用一个独立的 busy（或现成的同类标志）：点击置 true，结束/取消在 .finally 里放开，界面按它显示转圈，业务状态不动，也就无需备份和恢复
 - 多个结构完全一样的一行函数/处理器（saveA/saveB/saveC…）合成一个带 key 的
 - 前后端/层与层之间逐字段展开再重组（如 9 个 subtitle_*），而不是传一个对象
 - 别名变量、只转发的中间变量、仅为转一手而存在的事件/prop（先看项目惯例是不是本来就直接改）
@@ -515,7 +521,13 @@ const 判据精简 = `【kind=精简 的判法】（死代码/冗余/过度设�
    - 简化的方向是对的，且存在**行为等价的更保守写法**（如保留 .get 默认值、只删确实走不到的分支）→ **成立**，把等价写法写进 correction
    - 等价与否取决于**你读不到的东西**（上游数据形状、外部库、运行时配置）→ **读不出结论**，写清卡在哪，不要压成不成立
    - 你能**指出一个具体的输入**，使两种写法结果不同，并且找不到任何等价的简化 → **不成立**，写出那个输入
-5. 所有引用都已搜清、确实没有活引用（死代码），或简化后确实等价 → **成立**；
+   **替换写法本身要逐条核边界**，别只看「看着一样」：正则锚点（Python 的 \`$\` 会放过结尾换行，要 fullmatch）、默认值、
+   空串/None/0/空列表的区别、排序稳定性、短路求值与求值次数、异常类型、写回格式（如 JSON 的 ensure_ascii）、浅拷贝与引用。
+   有任何一项不等价，要么给出等价的保守写法写进 correction，要么判不成立
+5. **「复用现成的 X」类建议**：打开 X，核实它的语义、生命周期、被谁置位/放开和要替换的东西一致（如现成的 busy 是否在别的流程里也被置位或提前放开；
+   取消路径和失败路径是否都会经过放开它的地方）。不一致就不成立，或在 correction 里说明要怎么调整
+6. **改动成本**：成立的简化若净减不到 3 行，且要同步改测试/对外文案/接口形状/行为，判不成立；被单测直接调用的小函数的内联、被测试固定的返回字段的删除，要在 correction 里列出要改的测试
+7. 所有引用都已搜清、确实没有活引用（死代码），或简化后确实等价 → **成立**；
    把更准确的行号/连带孤儿/行数写进 correction（找手漏列的连带孤儿尤其要补）
 6. 无法排除动态引用/对外 API/跨仓库调用 → **读不出结论**，在 reason 里写清卡在哪，
    不要压成「不成立」——它是「不确定能不能删」，要留给人决定
@@ -600,11 +612,12 @@ const results = await pipeline(
     }
     const list = found.findings.map((f) => ({ ...f, kind: ['缺陷', '精简', '性能'].includes(f.kind) ? f.kind : d.kind }))
     const suppressed = found.suppressed || 0
-    if (!list.length) return { key: d.key, base: d.base, findings: [], verdicts: [], suppressed }
+    const skipped = Array.isArray(found.skipped) ? found.skipped.filter((x) => typeof x === 'string' && x.trim()).slice(0, 5) : []
+    if (!list.length) return { key: d.key, base: d.base, findings: [], verdicts: [], suppressed, skipped }
     const 批们 = []
     for (let i = 0; i < list.length; i += 验证批量) 批们.push([list.slice(i, i + 验证批量), i])
     const 各批 = await Promise.all(批们.map(([批, 偏移]) => 验证一批(d, 批, 偏移)))
-    return { key: d.key, base: d.base, findings: list, verdicts: 各批.flat(), suppressed }
+    return { key: d.key, base: d.base, findings: list, verdicts: 各批.flat(), suppressed, skipped }
   },
 )
 
@@ -739,6 +752,8 @@ const 证伪   = 去重.filter((m) => m.verdict === '不成立')
 const 存疑   = 去重.filter((m) => m.verdict === '读不出结论')
 const 未判定 = 去重.filter((m) => m.verdict === '未拿到判定')
 const 被截断 = rs.reduce((n, r) => n + (r.suppressed || 0), 0)
+// 找手「看着像可简化、但有意没报」的：只展示，不进任何桶（它们不是发现），让用户看得到判断并能否决
+const 有意没报 = rs.flatMap((r) => (r.skipped || []).map((x) => `${r.base}：${x}`))
 const 总行数 = 整理.reduce((n, m) => n + (m.linesSaved || 0), 0)
 
 // 候选 known：把本轮每个成立/存疑的发现列成一行，用户把「决定保持现状」或「已修掉」的几行复制进下一轮 args.known，
@@ -803,6 +818,7 @@ const 报告 = [
   ...未判定.map((m) => `- [${m.kind}] ${m.title} — \`${m.file}:${m.line}\`（${m.dim}）\n  - 声称的问题：${m.failure}\n  - 建议做法：${m.fix}`),
   `\n## 证伪·抽查（${证伪.length}）`,
   ...证伪.map((m) => `- [${m.kind}] ${m.title} — \`${m.file}:${m.line}\`（${m.dim}${m.alsoFoundBy ? `；另被 ${m.alsoFoundBy.join('、')} 报出` : ''}）— ${m.verifyReason}`),
+  有意没报.length ? `\n## 审查员有意没报的（${有意没报.length}，供你否决；想要哪条就告诉我）\n${有意没报.map((x) => `- ${x}`).join('\n')}` : '',
   候选known.length ? `\n## 候选 known（决定「保持现状」或「已修」的，复制进下一轮 args.known，别再被重复报）\n${候选known.map((k) => `- ${k}`).join('\n')}` : '',
 ].filter((x) => x !== '').join('\n')
 
